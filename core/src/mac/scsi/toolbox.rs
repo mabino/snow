@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn count_files_at_limit_succeeds() {
         let dir = TempDir::with_files("count_at_limit", MAX_FILE_LISTING_FILES);
-        let mut tb = BlueSCSI::new(Some(dir.0.clone()));
+        let mut tb = BlueSCSI::new(Some(dir.0.clone()), None);
 
         assert_eq!(count_files(&mut tb), Ok(MAX_FILE_LISTING_FILES as u8));
         assert_eq!(tb.take_pending_sense(), None);
@@ -439,7 +439,7 @@ mod tests {
     fn count_files_over_limit_reports_too_many_files() {
         for n in [MAX_FILE_LISTING_FILES + 1, 256, 300] {
             let dir = TempDir::with_files(&format!("count_over_{}", n), n);
-            let mut tb = BlueSCSI::new(Some(dir.0.clone()));
+            let mut tb = BlueSCSI::new(Some(dir.0.clone()), None);
 
             assert_eq!(
                 count_files(&mut tb),
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn count_files_clears_sense_from_a_previous_command() {
         let dir = TempDir::with_files("sense_cleared", MAX_FILE_LISTING_FILES + 1);
-        let mut tb = BlueSCSI::new(Some(dir.0.clone()));
+        let mut tb = BlueSCSI::new(Some(dir.0.clone()), None);
 
         assert_eq!(count_files(&mut tb), Err(STATUS_CHECK_CONDITION));
         assert!(tb.take_pending_sense().is_some());
@@ -471,7 +471,7 @@ mod tests {
     fn list_files_truncates_at_the_limit() {
         for n in [MAX_FILE_LISTING_FILES + 1, 256, 300] {
             let dir = TempDir::with_files(&format!("list_over_{}", n), n);
-            let mut tb = BlueSCSI::new(Some(dir.0.clone()));
+            let mut tb = BlueSCSI::new(Some(dir.0.clone()), None);
 
             let data = list_files(&mut tb);
             assert_eq!(
@@ -497,7 +497,7 @@ mod tests {
     /// SEND_FILE_PREP, then `chunks` blocks of `blocks_per_chunk` * 512 bytes,
     /// then SEND_FILE_END. Returns what landed on disk.
     fn send_file(dir: &Path, name: &str, chunks: usize, blocks_per_chunk: u8) -> Vec<u8> {
-        let mut tb = BlueSCSI::new(Some(dir.to_path_buf()));
+        let mut tb = BlueSCSI::new(Some(dir.to_path_buf()), None);
         let mut debug = false;
 
         let mut prep = vec![0u8; 33];
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn send_file_legacy_client_pattern() {
         let dir = TempDir::with_files("send_legacy", 0);
-        let mut tb = BlueSCSI::new(Some(dir.0.clone()));
+        let mut tb = BlueSCSI::new(Some(dir.0.clone()), None);
         let mut debug = false;
 
         let mut prep = vec![0u8; 33];
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn list_files_under_the_limit_is_complete() {
         let dir = TempDir::with_files("list_under", 3);
-        let mut tb = BlueSCSI::new(Some(dir.0.clone()));
+        let mut tb = BlueSCSI::new(Some(dir.0.clone()), None);
 
         assert_eq!(list_files(&mut tb).len(), 3 * TOOLBOX_ENTRY_SIZE);
     }
@@ -673,7 +673,7 @@ mod fd_lifetime_tests {
     fn overwrite_in_place_between_transfers() {
         let d = Dir::new("inplace");
         d.write("a.bin", b'A', 200_000);
-        let mut tb = BlueSCSI::new(Some(d.0.clone()));
+        let mut tb = BlueSCSI::new(Some(d.0.clone()), None);
 
         assert_all(
             &client_download(&mut tb, 0, 200_000),
@@ -695,7 +695,7 @@ mod fd_lifetime_tests {
     fn replace_inode_between_transfers() {
         let d = Dir::new("inode");
         d.write("a.bin", b'A', 200_000);
-        let mut tb = BlueSCSI::new(Some(d.0.clone()));
+        let mut tb = BlueSCSI::new(Some(d.0.clone()), None);
 
         assert_all(
             &client_download(&mut tb, 0, 200_000),
@@ -718,7 +718,7 @@ mod fd_lifetime_tests {
     fn abandoned_transfer_then_overwrite() {
         let d = Dir::new("abandon");
         d.write("a.bin", b'A', 200_000);
-        let mut tb = BlueSCSI::new(Some(d.0.clone()));
+        let mut tb = BlueSCSI::new(Some(d.0.clone()), None);
 
         // one chunk only, then give up
         let first = req(&mut tb, &cdb_get(0, 0, CHUNK as u8)).unwrap();
@@ -739,7 +739,7 @@ mod fd_lifetime_tests {
     fn stale_small_size_still_serves_new_bytes() {
         let d = Dir::new("stale_small");
         d.write("a.bin", b'A', 10);
-        let mut tb = BlueSCSI::new(Some(d.0.clone()));
+        let mut tb = BlueSCSI::new(Some(d.0.clone()), None);
 
         assert_all(&client_download(&mut tb, 0, 10), b'A', 10, "first");
         d.write("a.bin", b'B', 100);
@@ -756,7 +756,7 @@ mod fd_lifetime_tests {
     fn stale_large_size_still_serves_new_bytes() {
         let d = Dir::new("stale_large");
         d.write("a.bin", b'A', 200_000);
-        let mut tb = BlueSCSI::new(Some(d.0.clone()));
+        let mut tb = BlueSCSI::new(Some(d.0.clone()), None);
 
         assert_all(
             &client_download(&mut tb, 0, 200_000),
@@ -779,7 +779,7 @@ mod fd_lifetime_tests {
         let d = Dir::new("twofiles");
         d.write("a.bin", b'A', 200_000);
         d.write("b.bin", b'B', 200_000);
-        let mut tb = BlueSCSI::new(Some(d.0.clone()));
+        let mut tb = BlueSCSI::new(Some(d.0.clone()), None);
 
         assert_all(
             &client_download(&mut tb, 0, 200_000),
@@ -825,7 +825,7 @@ mod fd_close_tests {
     #[test]
     fn file_is_closed_at_end_of_transfer() {
         let d = dir("closed", 4096);
-        let mut tb = BlueSCSI::new(Some(d.clone()));
+        let mut tb = BlueSCSI::new(Some(d.clone()), None);
 
         assert!(matches!(get(&mut tb, 0, 0, 1), ScsiCmdResult::DataIn(v) if v.len() == 4096));
         assert!(
@@ -845,7 +845,7 @@ mod fd_close_tests {
     #[test]
     fn file_stays_open_mid_transfer() {
         let d = dir("midxfer", 200_000);
-        let mut tb = BlueSCSI::new(Some(d.clone()));
+        let mut tb = BlueSCSI::new(Some(d.clone()), None);
 
         assert!(matches!(get(&mut tb, 0, 0, 16), ScsiCmdResult::DataIn(v) if v.len() == 65536));
         assert!(tb.file.is_some(), "file closed mid-transfer");
@@ -862,7 +862,7 @@ mod fd_close_tests {
     #[test]
     fn read_is_capped_to_the_file_size() {
         let d = dir("capped", 100);
-        let mut tb = BlueSCSI::new(Some(d.clone()));
+        let mut tb = BlueSCSI::new(Some(d.clone()), None);
 
         match get(&mut tb, 0, 0, 16) {
             ScsiCmdResult::DataIn(v) => assert_eq!(v.len(), 100),
