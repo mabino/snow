@@ -681,10 +681,24 @@ impl Scc {
         }
     }
 
+    /// Z8530 SDLC address search: with WR3 bit 2 set, the receiver only
+    /// accepts frames addressed to the station address (WR6) or broadcast.
+    /// Evaluated when the receiver picks up a frame, like the hardware does;
+    /// the LLAP driver relies on this during node address acquisition (any
+    /// control frame that gets through means "tentative address taken").
+    fn sdlc_frame_accepted(&self, chi: usize, frame: &[u8]) -> bool {
+        let ch = &self.ch[chi];
+        !ch.sdlc_address_search_mode
+            || matches!(frame.first(), Some(&dst) if dst == ch.sdlc_address || dst == 0xFF)
+    }
+
     /// Push a complete LocalTalk/SDLC frame for reception
     pub fn push_rx_frame(&mut self, ch: SccCh, frame: Vec<u8>) {
         let chi = ch.to_usize().unwrap();
         if !self.ch[chi].rx_enable {
+            return;
+        }
+        if !self.ch[chi].lt_rx_chr_avail && !self.sdlc_frame_accepted(chi, &frame) {
             return;
         }
 
@@ -715,7 +729,7 @@ impl Scc {
     /// Check if there's a queued frame and start receiving it
     fn lt_check_queued_frame(&mut self, chi: usize) {
         // Only start a new frame if chr_avail is false (no frame being processed)
-        if !self.ch[chi].lt_rx_chr_avail && self.ch[chi].rx_queue.len() >= 2 {
+        while !self.ch[chi].lt_rx_chr_avail && self.ch[chi].rx_queue.len() >= 2 {
             // Extract queued frame
             let len_hi = self.ch[chi].rx_queue.pop_front().unwrap() as usize;
             let len_lo = self.ch[chi].rx_queue.pop_front().unwrap() as usize;
@@ -723,6 +737,9 @@ impl Scc {
 
             if self.ch[chi].rx_queue.len() >= len {
                 let frame: Vec<u8> = self.ch[chi].rx_queue.drain(..len).collect();
+                if !self.sdlc_frame_accepted(chi, &frame) {
+                    continue;
+                }
                 self.ch[chi].lt_rx_frame = Some(frame);
                 self.ch[chi].lt_rx_offset = 0;
                 self.ch[chi].lt_end_of_frame = false;
@@ -732,6 +749,8 @@ impl Scc {
                 self.lt_rx_buff_advance(chi);
                 self.ch[chi].lt_rx_chr_avail = true;
                 self.ch[chi].first_char = true; // For interrupt mode 1
+            } else {
+                break;
             }
         }
     }
@@ -812,5 +831,63 @@ impl BusMember<Address> for Scc {
         } else {
             Some(self.write_data(ch, val))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Program channel B like the LLAP driver: SDLC, station address
+    /// `addr`, receiver enabled in hunt mode with address search on/off
+    fn llap_receiver(addr: u8, search: bool) -> Scc {
+        let mut scc = Scc::new();
+        let b = SccCh::B;
+        scc.write_ctrl(b, 6);
+        scc.write_ctrl(b, addr);
+        scc.write_ctrl(b, 3);
+        scc.write_ctrl(b, if search { 0xDD } else { 0xD9 });
+        scc
+    }
+
+    /// First byte of the frame the receiver picked up, if any
+    fn receive_frame(scc: &mut Scc) -> Option<u8> {
+        scc.ch[1].lt_rx_chr_avail.then(|| scc.read_data(SccCh::B))
+    }
+
+    #[test]
+    fn sdlc_address_search_filters_at_pickup() {
+        let mut scc = llap_receiver(0x4F, true);
+        assert!(scc.ch[1].sdlc);
+
+        // A foreign ENQ is ignored by the receiver
+        scc.push_rx_frame(SccCh::B, vec![0x20, 0x20, 0x81]);
+        assert!(!scc.ch[1].lt_rx_chr_avail);
+
+        // Frames for us and broadcasts are received
+        scc.push_rx_frame(SccCh::B, vec![0x4F, 0x20, 0x81]);
+        assert_eq!(receive_frame(&mut scc), Some(0x4F));
+    }
+
+    #[test]
+    fn sdlc_queued_frames_are_filtered_when_picked_up() {
+        let mut scc = llap_receiver(0x4F, true);
+        scc.push_rx_frame(SccCh::B, vec![0xFF, 0x20, 0x01]);
+        // While a frame is in progress, later frames are queued...
+        scc.push_rx_frame(SccCh::B, vec![0x21, 0x20, 0x81]);
+        scc.push_rx_frame(SccCh::B, vec![0x4F, 0x20, 0x82]);
+        // ... and the foreign one is skipped when the receiver gets to it
+        scc.ch[1].lt_rx_chr_avail = false;
+        scc.lt_check_queued_frame(1);
+        assert_eq!(scc.ch[1].lt_rx_frame.as_deref(), Some(&[0x4F, 0x20, 0x82][..]));
+    }
+
+    #[test]
+    fn sdlc_without_address_search_receives_everything() {
+        let mut scc = llap_receiver(0x4F, true);
+        scc.write_ctrl(SccCh::B, 3);
+        scc.write_ctrl(SccCh::B, 0xD9); // search mode off
+        scc.push_rx_frame(SccCh::B, vec![0x20, 0x21, 0x01]);
+        assert!(scc.ch[1].lt_rx_chr_avail);
     }
 }

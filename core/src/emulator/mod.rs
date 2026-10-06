@@ -1456,7 +1456,14 @@ impl Tickable for Emulator {
                             .send(EmulatorEvent::SerialBridgeStatus(ch, Some(bridge.status())))?;
                     }
 
-                    // Read incoming data from bridge and send to SCC
+                    // Read incoming data from bridge and send to SCC. A
+                    // LocalTalk frame is only handed over while the SCC
+                    // receiver is ready for it; otherwise it would be lost
+                    // (the receiver drops frames while disabled, e.g. while
+                    // the Mac is transmitting) - it stays queued instead.
+                    if bridge.is_localtalk() && !self.config.scc().is_rx_ready_for_data(ch) {
+                        continue;
+                    }
                     let rx_data = bridge.read_to_scc();
                     if !rx_data.is_empty() {
                         self.config.scc_mut().push_rx(ch, &rx_data);
