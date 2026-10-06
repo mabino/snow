@@ -5127,6 +5127,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow_frontend_web"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "env_logger",
+ "log",
+ "pico-args",
+ "serde",
+ "serde_json",
+ "snow_core",
+ "snow_floppy",
+]
+
+[[package]]
 name = "snow_nat"
 version = "1.5.0"
 dependencies = [

@@ -1,0 +1,18 @@
+{
+  "name": "snow-web-tests",
+  "private": true,
+  "type": "module",
+  "description": "Tests for the Snow web frontend and snow-bridge",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test unit/*.test.mjs && node bridge.mjs && node e2e.mjs",
+    "test:unit": "node --test unit/*.test.mjs",
+    "test:bridge": "node bridge.mjs",
+    "test:e2e": "node e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

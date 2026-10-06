@@ -1,0 +1,32 @@
+[package]
+name = "snow_frontend_web"
+version = "1.0.0"
+edition = "2021"
+description = "Standalone WebAssembly frontend for Snow (runs in a browser tab)"
+
+[lib]
+name = "snow_frontend_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "snow_web"
+path = "src/main.rs"
+
+[features]
+# The DaynaPORT SCSI/Link ethernet adapter (used with --ethernet)
+default = ["ethernet"]
+ethernet = ["snow_core/ethernet"]
+
+[dependencies]
+snow_core = { path = "../core" }
+snow_floppy = { path = "../floppy" }
+crossbeam-channel = "0.5.15"
+log = "0.4"
+env_logger = "0.11"
+pico-args = "0.5"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints]
+workspace = true

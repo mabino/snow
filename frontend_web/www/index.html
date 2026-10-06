@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snow Web — System 6 with AppleTalk</title>
+<style>
+    :root {
+        color-scheme: light dark;
+        --bg: #f4f3ef; --panel: #ffffff; --text: #1d1d1f; --muted: #6e6e73;
+        --line: #d9d7d0; --accent: #2a6fdb; --ok: #1e8e3e; --bad: #c5221f;
+        --screen-bg: #000;
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg: #161617; --panel: #1f1f21; --text: #ececee; --muted: #9a9aa0;
+            --line: #36363a; --accent: #5b9bff; --ok: #4cc06a; --bad: #ff6b60;
+        }
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+        font: 14px/1.45 system-ui, -apple-system, sans-serif;
+    }
+    main { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    #config {
+        flex: 1 1 300px; max-width: 400px; background: var(--panel);
+        border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+    }
+    #stage { flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+    h1 { font-size: 17px; margin: 0 0 4px; }
+    .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 8px; }
+    h2 {
+        font-size: 11.5px; margin: 14px 0 6px; text-transform: uppercase;
+        letter-spacing: .06em; color: var(--muted);
+    }
+    .field { display: grid; grid-template-columns: 96px 1fr; gap: 8px; align-items: center; margin: 5px 0; }
+    .field > span { color: var(--muted); font-size: 13px; }
+    .check { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }
+    .check small { display: block; color: var(--muted); font-size: 12px; }
+    select, input[type=text] {
+        width: 100%; min-width: 0; padding: 5px 7px; font: inherit;
+        background: var(--bg); color: inherit; border: 1px solid var(--line); border-radius: 6px;
+    }
+    input[type=file] { min-width: 0; max-width: 100%; font-size: 12.5px; }
+    .buttons { display: flex; gap: 8px; margin-top: 14px; }
+    button {
+        font: inherit; padding: 7px 18px; border-radius: 7px; cursor: pointer;
+        border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    }
+    button.secondary { background: transparent; color: var(--text); border-color: var(--line); }
+    button:disabled { opacity: .45; cursor: default; }
+    #status { margin-top: 10px; font-size: 13px; min-height: 1.4em; }
+    #status.error { color: var(--bad); }
+    .screen-wrap { overflow-x: auto; }
+    #screen {
+        display: block; background: var(--screen-bg); border-radius: 4px;
+        image-rendering: pixelated; max-width: 100%; cursor: none; outline: none;
+    }
+    #screen:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+    #netbar {
+        display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px;
+        background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+    }
+    #netbar b { font-weight: 600; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 5px; }
+    .dot.up { background: var(--ok); } .dot.down { background: var(--bad); }
+    #console {
+        margin: 0; max-height: 180px; overflow: auto; padding: 8px 10px;
+        font: 11.5px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all;
+        background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    }
+    code { font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+<section id="config">
+    <h1>Snow Web</h1>
+    <p class="sub">Classic 68k Macintosh emulator with AppleTalk networking.
+        Start <code>snow-bridge</code> on the host, then open this page from it.</p>
+
+    <h2>Machine</h2>
+    <label class="field"><span>Model</span><select id="machine"></select></label>
+    <label class="field"><span>RAM</span><select id="ram"></select></label>
+
+    <h2>Media</h2>
+    <label class="field"><span>ROM</span><input type="file" id="romFile"></label>
+    <label class="field"><span>Hard disks</span><input type="file" id="diskFiles" multiple></label>
+    <label class="field"><span>Floppies</span><input type="file" id="floppyFiles" multiple></label>
+    <label class="field"><span>PRAM</span><input type="file" id="pramFile"></label>
+
+    <h2>Networking</h2>
+    <label class="check"><input type="checkbox" id="localtalk" checked>
+        <span>AppleTalk over LocalTalk<small>Printer port, relayed by the bridge to other tabs and the LToUDP LAN</small></span></label>
+    <label class="check"><input type="checkbox" id="appletalkPram" checked>
+        <span>AppleTalk active at boot<small>Generated PRAM with a random node address, used when no PRAM file is chosen</small></span></label>
+    <label class="check"><input type="checkbox" id="ethernet">
+        <span>DaynaPORT Ethernet + NAT<small>SCSI ID 3; needs the DaynaPORT driver and MacTCP in the guest</small></span></label>
+    <label class="field"><span>Bridge</span><input type="text" id="bridgeUrl" spellcheck="false"></label>
+
+    <h2>Options</h2>
+    <label class="check"><input type="checkbox" id="mouseDeltas"><span>Relative mouse (hardware deltas)</span></label>
+    <label class="check"><input type="checkbox" id="debugLog"><span>Verbose log</span></label>
+
+    <div class="buttons">
+        <button id="startBtn">Start</button>
+        <button id="stopBtn" class="secondary" disabled>Stop</button>
+    </div>
+    <div id="status" role="status">Choose a ROM and a System 6 disk, then press Start.</div>
+</section>
+
+<section id="stage">
+    <div class="screen-wrap"><canvas id="screen" width="512" height="342" tabindex="0"></canvas></div>
+    <div id="netbar">
+        <span><span class="dot" id="linkDot"></span><b id="linkText">Bridge: not connected</b></span>
+        <span>LocalTalk frames: <b id="ltRx">0</b> in / <b id="ltTx">0</b> out</span>
+        <span>Ethernet frames: <b id="ethRx">0</b> in / <b id="ethTx">0</b> out</span>
+        <span>AppleTalk nodes: <b id="nodes">none</b></span>
+    </div>
+    <pre id="console" aria-label="Emulator log"></pre>
+</section>
+</main>
+
+<script type="module">
+import { IoRing, createIoBuffer, encode, splitFrames, KEY_SCANCODES, REC } from "./snow-io.js";
+
+// Gestalt IDs and RAM sizes mirror core/src/mac/mod.rs and the
+// GESTALT_MODEL_MAP in src/main.rs
+const MB = 1024 * 1024;
+const MACHINES = {
+    4: { name: "Macintosh Plus", rams: [1, 2, 4].map((m) => m * MB) },
+    5: { name: "Macintosh SE", rams: [1, 2, 4].map((m) => m * MB) },
+    17: { name: "Macintosh Classic", rams: [1, 2, 4].map((m) => m * MB) },
+    3: { name: "Macintosh 512Ke", rams: [512 * 1024] },
+    6: { name: "Macintosh II", rams: [1, 2, 4, 8].map((m) => m * MB) },
+    7: { name: "Macintosh IIx", rams: [1, 2, 4, 8, 16, 32].map((m) => m * MB) },
+    9: { name: "Macintosh SE/30", rams: [1, 2, 4, 8, 16, 32].map((m) => m * MB) },
+};
+
+const $ = (id) => document.getElementById(id);
+const screen = $("screen");
+const params = new URLSearchParams(location.search);
+
+for (const [id, m] of Object.entries(MACHINES)) {
+    $("machine").add(new Option(m.name, id));
+}
+$("machine").value = params.get("model") || "5";
+function refillRam() {
+    const rams = MACHINES[$("machine").value].rams;
+    $("ram").innerHTML = "";
+    for (const ram of rams) {
+        $("ram").add(new Option(ram >= MB ? `${ram / MB} MB` : `${ram / 1024} KB`, ram));
+    }
+    $("ram").value = rams.includes(4 * MB) ? 4 * MB : rams[rams.length - 1];
+}
+$("machine").addEventListener("change", refillRam);
+refillRam();
+
+// When the page is served by snow-bridge, the bridge is the page's origin
+const defaultBridge = location.protocol.startsWith("http")
+    ? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/bridge`
+    : "ws://localhost:8080/bridge";
+$("bridgeUrl").value = params.get("bridge") || defaultBridge;
+if (params.get("ethernet") === "1") $("ethernet").checked = true;
+if (params.get("localtalk") === "0") $("localtalk").checked = false;
+
+// ------------------------------------------------------------------ status
+
+function setStatus(text, isError = false) {
+    $("status").textContent = text;
+    $("status").classList.toggle("error", isError);
+}
+const consoleLines = [];
+function log(line) {
+    consoleLines.push(line);
+    if (consoleLines.length > 400) consoleLines.splice(0, consoleLines.length - 400);
+    $("console").textContent = consoleLines.join("\n");
+    $("console").scrollTop = $("console").scrollHeight;
+}
+
+// Counters, exposed for automated tests as window.snow
+const stats = {
+    video: 0, ltRx: 0, ltTx: 0, ethRx: 0, ethTx: 0, nodes: new Set(), link: false, errors: [], recent: [],
+    // LLAP frame counts by direction and kind, and the addresses this Mac
+    // probed (lapENQ) while acquiring its node address
+    llap: { out: { enq: 0, ack: 0, data: 0 }, in: { enq: 0, ack: 0, data: 0 } },
+    probed: [],
+};
+window.snow = { stats };
+function renderNet() {
+    $("ltRx").textContent = stats.ltRx;
+    $("ltTx").textContent = stats.ltTx;
+    $("ethRx").textContent = stats.ethRx;
+    $("ethTx").textContent = stats.ethTx;
+    $("nodes").textContent = stats.nodes.size
+        ? [...stats.nodes].sort((a, b) => a - b).map((n) => n.toString()).join(", ")
+        : "none";
+}
+setInterval(renderNet, 500);
+
+// LToUDP datagram: 4 byte sender id, then LLAP [dst][src][type]. Nodes are
+// learned from data (DDP) frames only: ENQ probes carry tentative addresses
+// that a node may still give up.
+function noteLocalTalk(dgram, dir) {
+    if (dgram.length >= 7) {
+        const counts = stats.llap[dir.trim()];
+        const type = dgram[6];
+        if (type === 0x81) counts.enq++;
+        else if (type === 0x82) counts.ack++;
+        else if (type < 0x80) counts.data++;
+        if (dir === "out" && type === 0x81 && stats.probed[stats.probed.length - 1] !== dgram[4]) {
+            stats.probed.push(dgram[4]);
+        }
+    }
+    // Run-length log of the last frames (for diagnostics/tests)
+    if (dgram.length >= 7) {
+        const key = `${dir} ${[4, 5, 6].map((i) => dgram[i].toString(16).padStart(2, "0")).join(" ")} len=${dgram.length - 4}`;
+        const last = stats.recent[stats.recent.length - 1];
+        if (last && last.key === key) last.count++;
+        else stats.recent.push({ key, count: 1, t: Math.round(performance.now()) });
+        if (stats.recent.length > 300) stats.recent.shift();
+    }
+    if (dgram.length >= 7 && dgram[6] < 0x80 && dgram[5] !== 0 && dgram[5] !== 0xff) {
+        stats.nodes.add(dgram[5]);
+    }
+}
+
+// ----------------------------------------------------------- bridge link
+
+let ring = null;
+let worker = null;
+
+class BridgeLink {
+    constructor(url) {
+        this.url = url;
+        this.ws = null;
+        this.carry = new Uint8Array(0);
+        this.closed = false;
+        this.connect();
+    }
+    connect() {
+        if (this.closed) return;
+        let ws;
+        try {
+            ws = new WebSocket(this.url);
+        } catch (err) {
+            this.setLink(false, `bad URL ${this.url}`);
+            return;
+        }
+        ws.binaryType = "arraybuffer";
+        ws.onopen = () => this.setLink(true, this.url);
+        ws.onmessage = (event) => this.receive(new Uint8Array(event.data));
+        ws.onclose = () => {
+            if (this.ws === ws) {
+                this.ws = null;
+                this.setLink(false, `${this.url} (retrying)`);
+                setTimeout(() => this.connect(), 2000);
+            }
+        };
+        this.ws = ws;
+    }
+    setLink(up, description) {
+        stats.link = up;
+        $("linkDot").className = "dot " + (up ? "up" : "down");
+        $("linkText").textContent = up ? `Bridge: ${this.url}` : `Bridge: ${description}`;
+        ring?.push(...encode.link(up, description));
+        if (up) log(`bridge connected: ${this.url}`);
+    }
+    receive(bytes) {
+        let stream = bytes;
+        if (this.carry.length) {
+            stream = new Uint8Array(this.carry.length + bytes.length);
+            stream.set(this.carry);
+            stream.set(bytes, this.carry.length);
+        }
+        const [frames, rest] = splitFrames(stream);
+        this.carry = rest.slice();
+        for (const [tag, payload] of frames) {
+            if (tag === REC.LOCALTALK) {
+                stats.ltRx++;
+                noteLocalTalk(payload, "in ");
+            } else if (tag === REC.ETHERNET) {
+                stats.ethRx++;
+            } else {
+                continue;
+            }
+            ring?.push(tag, payload);
+        }
+    }
+    send(buffer) {
+        const bytes = new Uint8Array(buffer);
+        for (const [tag, payload] of splitFrames(bytes)[0]) {
+            if (tag === REC.LOCALTALK) {
+                stats.ltTx++;
+                noteLocalTalk(payload, "out");
+            } else if (tag === REC.ETHERNET) {
+                stats.ethTx++;
+            }
+        }
+        if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(buffer);
+    }
+    close() {
+        this.closed = true;
+        this.ws?.close();
+        this.ws = null;
+    }
+}
+let bridge = null;
+
+// ------------------------------------------------------------------- audio
+
+let audioCtx = null, audioNode = null, audioRate = 0, audioChannels = 1;
+let audioChunks = [], audioHead = 0, audioDrained = 0;
+
+function audioOpen(sampleRate, channels) {
+    if (!audioCtx) return;
+    audioRate = sampleRate;
+    audioChannels = Math.min(2, Math.max(1, channels));
+    audioChunks = [];
+    audioHead = 0;
+    audioNode?.disconnect();
+    audioNode = audioCtx.createScriptProcessor(2048, 0, audioChannels);
+    audioNode.onaudioprocess = audioProcess;
+    audioNode.connect(audioCtx.destination);
+}
+
+function audioProcess(e) {
+    const frames = e.outputBuffer.length;
+    const ratio = audioRate / audioCtx.sampleRate; // source frames per output frame
+    for (let ch = 0; ch < audioChannels; ch++) {
+        const out = e.outputBuffer.getChannelData(ch);
+        let pos = audioHead, chunk = 0;
+        for (let i = 0; i < frames; i++, pos += ratio) {
+            let c = audioChunks[chunk];
+            while (c && pos >= c.length / audioChannels) {
+                pos -= c.length / audioChannels;
+                c = audioChunks[++chunk];
+            }
+            out[i] = c ? c[(pos | 0) * audioChannels + ch] : 0;
+        }
+    }
+    // Advance the read position
+    let consumed = frames * ratio;
+    audioDrained += consumed * audioChannels;
+    audioHead += consumed;
+    while (audioChunks.length && audioHead >= audioChunks[0].length / audioChannels) {
+        audioHead -= audioChunks[0].length / audioChannels;
+        audioChunks.shift();
+    }
+    if (!audioChunks.length) audioHead = 0;
+    if (audioDrained >= 256) {
+        ring?.push(...encode.audioDrained(audioDrained | 0));
+        audioDrained = 0;
+    }
+}
+
+// ------------------------------------------------------------------- video
+
+let imageData = null;
+function videoOpen(width, height) {
+    screen.width = width;
+    screen.height = height;
+    imageData = screen.getContext("2d").createImageData(width, height);
+}
+function videoFrame(data) {
+    if (!imageData) return;
+    imageData.data.set(new Uint8Array(data, 0, imageData.data.length));
+    screen.getContext("2d").putImageData(imageData, 0, 0);
+    stats.video++;
+}
+
+// ------------------------------------------------------------------- input
+
+function sendInput(record) {
+    ring?.push(...record);
+}
+function keyEvent(e, down) {
+    if (!ring || e.repeat || e.metaKey || e.ctrlKey) return;
+    if (e.target instanceof HTMLElement && e.target.closest("input, select, textarea")) return;
+    const scancode = KEY_SCANCODES[e.code];
+    if (scancode === undefined) return;
+    e.preventDefault();
+    sendInput(encode.key(scancode, down));
+}
+window.addEventListener("keydown", (e) => keyEvent(e, true));
+window.addEventListener("keyup", (e) => keyEvent(e, false));
+
+screen.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    screen.focus();
+    screen.setPointerCapture(e.pointerId);
+    sendInput(encode.mouseButton(true));
+});
+screen.addEventListener("pointerup", (e) => {
+    e.preventDefault();
+    sendInput(encode.mouseButton(false));
+});
+screen.addEventListener("pointermove", (e) => {
+    const rect = screen.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const x = Math.round((e.clientX - rect.left) * (screen.width / rect.width));
+    const y = Math.round((e.clientY - rect.top) * (screen.height / rect.height));
+    sendInput(encode.mouseAbs(x, y));
+    if (e.movementX || e.movementY) sendInput(encode.mouseRel(e.movementX, e.movementY));
+});
+window.addEventListener("blur", () => sendInput(encode.mouseButton(false)));
+
+// ------------------------------------------------------------------- start
+
+async function fetchMedia(url) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+    return response.arrayBuffer();
+}
+
+async function start() {
+    if (worker) return;
+    if (!self.crossOriginIsolated) {
+        setStatus("This page needs cross-origin isolation (SharedArrayBuffer). " +
+            "Serve it with snow-bridge --www, which sends the COOP/COEP headers.", true);
+        return;
+    }
+    $("startBtn").disabled = true;
+    try {
+        audioCtx = new AudioContext();
+        audioCtx.resume().catch(() => {});
+    } catch (err) {
+        audioCtx = null;
+    }
+
+    const files = [], transfer = [], argv = [];
+    const add = (data, path, flag) => {
+        files.push({ path, data });
+        transfer.push(data);
+        argv.push(flag, path);
+    };
+    try {
+        setStatus("Reading media…");
+        const rom = $("romFile").files[0] ? await $("romFile").files[0].arrayBuffer()
+            : params.get("rom") ? await fetchMedia(params.get("rom")) : null;
+        if (!rom) throw new Error("Choose a ROM file first");
+        add(rom, "/media/rom.rom", "--rom");
+
+        const disks = [...$("diskFiles").files];
+        for (let i = 0; i < disks.length; i++) add(await disks[i].arrayBuffer(), `/media/disk${i}`, "--disk");
+        for (const [i, url] of params.getAll("disk").entries()) add(await fetchMedia(url), `/media/urldisk${i}`, "--disk");
+        const floppies = [...$("floppyFiles").files].slice(0, 3);
+        for (let i = 0; i < floppies.length; i++) add(await floppies[i].arrayBuffer(), `/media/floppy${i}`, "--floppy");
+        if ($("pramFile").files[0]) add(await $("pramFile").files[0].arrayBuffer(), "/media/pram", "--pram");
+
+        argv.push("--gestalt-id", $("machine").value, "--ram-size", $("ram").value);
+        if ($("mouseDeltas").checked) argv.push("--use-mouse-deltas");
+        if ($("debugLog").checked) argv.push("--debug-log");
+        if ($("localtalk").checked) argv.push("--localtalk-bridge");
+        if ($("localtalk").checked && $("appletalkPram").checked) {
+            argv.push("--appletalk-pram");
+            if (params.get("node")) argv.push("--appletalk-node", params.get("node"));
+        }
+        if ($("ethernet").checked) argv.push("--ethernet-nat");
+    } catch (err) {
+        setStatus(err.message || String(err), true);
+        $("startBtn").disabled = false;
+        return;
+    }
+
+    const io = createIoBuffer();
+    ring = new IoRing(io);
+    if ($("localtalk").checked || $("ethernet").checked) {
+        bridge = new BridgeLink($("bridgeUrl").value.trim());
+    }
+
+    worker = new Worker("worker.js", { type: "module" });
+    worker.onmessage = ({ data: msg }) => {
+        switch (msg?.type) {
+            case "video-open": videoOpen(msg.width, msg.height); setStatus("Running."); break;
+            case "video": videoFrame(msg.data); break;
+            case "audio-open": audioOpen(msg.sampleRate, msg.channels); break;
+            case "audio":
+                // While the browser keeps audio suspended (no user gesture
+                // yet), drop samples instead of letting them pile up
+                if (audioNode && audioCtx?.state === "running") audioChunks.push(new Float32Array(msg.data));
+                else ring.push(...encode.audioDrained(msg.data.byteLength / 4));
+                break;
+            case "net-send": bridge?.send(msg.data); break;
+            case "clipboard": navigator.clipboard?.writeText(msg.text).catch(() => {}); break;
+            case "log": log(msg.line); break;
+            case "error":
+                stats.errors.push(msg.message);
+                setStatus(msg.message, true);
+                log("ERROR: " + msg.message);
+                break;
+        }
+    };
+    worker.onerror = (e) => setStatus("Worker error: " + (e.message || "unknown"), true);
+    worker.postMessage({ type: "start", argv, files, io }, transfer);
+    $("stopBtn").disabled = false;
+    setStatus("Starting…");
+    screen.focus();
+}
+
+function stop() {
+    worker?.terminate();
+    worker = null;
+    bridge?.close();
+    bridge = null;
+    ring = null;
+    audioNode?.disconnect();
+    audioNode = null;
+    audioCtx?.close().catch(() => {});
+    audioCtx = null;
+    $("startBtn").disabled = false;
+    $("stopBtn").disabled = true;
+    $("linkDot").className = "dot";
+    $("linkText").textContent = "Bridge: not connected";
+    setStatus("Stopped.");
+}
+
+$("startBtn").addEventListener("click", start);
+$("stopBtn").addEventListener("click", stop);
+if (params.get("autostart") === "1") start();
+</script>
+</body>
+</html>

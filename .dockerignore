@@ -1,0 +1,9 @@
+target/
+**/node_modules/
+frontend_web/www/snow_web.*
+frontend_web/www/media/
+*.rom
+*.dsk
+*.img
+*.hda
+!frontend_web/assets/*.hda
