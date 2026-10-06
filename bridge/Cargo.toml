@@ -1,0 +1,21 @@
+[package]
+name = "snow_bridge"
+version = "1.5.0"
+edition = "2024"
+description = "Host-side network bridge for the Snow WebAssembly port"
+
+[dependencies]
+# No features needed: used for the shared wire protocol (tags + framing)
+anyhow = "1.0"
+snow_core = { path = "../core" }
+snow_nat = { path = "../nat", features = ["mactcp_helpers", "https_stripping"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs", "io-util"] }
+tokio-tungstenite = "0.27"
+futures-util = "0.3"
+crossbeam-channel = "0.5"
+pico-args = "0.5"
+log = "0.4"
+env_logger = "0.11"
+
+[lints]
+workspace = true
