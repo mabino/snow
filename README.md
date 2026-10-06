@@ -1,5 +1,23 @@
 # Snow - Classic Macintosh emulator
 
+> **About this fork** — [mabino/snow](https://github.com/mabino/snow) builds on
+> [mihaip/snow](https://github.com/mihaip/snow) (Snow as used by
+> [Infinite Mac](https://infinitemac.org)), itself a fork of
+> [twvd/snow](https://github.com/twvd/snow). It adds a standalone WebAssembly
+> frontend with **AppleTalk networking for System 6** between browser tabs and
+> the LAN; see [Web and AppleTalk](docs/src/manual/network/web.md),
+> [Testing AppleTalk in System 6](docs/src/manual/network/web-testing.md) and
+> [frontend_web](frontend_web/README.md). The work is split into branches
+> that can be proposed upstream on their own:
+>
+> | Branch | Contents | Based on |
+> |---|---|---|
+> | `fix/localtalk` | LocalTalk fixes (receive filtering, broadcasts), core test build fix | mihaip/snow `master` |
+> | `fix/localtalk-twvd` | the LocalTalk fixes alone, for the original Snow | twvd/snow `master` |
+> | `feature/net-hub` | frontend-provided network transport for web builds | `fix/localtalk` |
+> | `feature/web-frontend` | `snow-bridge` and the web frontend | `feature/net-hub` |
+> | `web-appletalk` (default) | all of the above plus this note | `feature/web-frontend` |
+
 [![codecov](https://codecov.io/github/twvd/snow/graph/badge.svg?token=QRQ95QB915)](https://codecov.io/github/twvd/snow) [![Checks and tests](https://github.com/twvd/snow/actions/workflows/tests.yml/badge.svg)](https://github.com/twvd/snow/actions/workflows/tests.yml) [![Build - Linux x64](https://github.com/twvd/snow/actions/workflows/build_linux.yml/badge.svg)](https://github.com/twvd/snow/actions/workflows/build_linux.yml) [![Build - Windows](https://github.com/twvd/snow/actions/workflows/build_windows.yml/badge.svg)](https://github.com/twvd/snow/actions/workflows/build_windows.yml) [![Build - MacOS](https://github.com/twvd/snow/actions/workflows/build_macos.yml/badge.svg)](https://github.com/twvd/snow/actions/workflows/build_macos.yml)
 
 [![](https://dcbadge.limes.pink/api/server/JTdhZ2GbTj)](https://discord.gg/JTdhZ2GbTj)
