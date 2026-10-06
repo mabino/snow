@@ -23,6 +23,9 @@ pub const LTOUDP_PORT: u16 = 1954;
 /// LocalTalk over UDP multicast address
 pub const LTOUDP_MULTICAST: Ipv4Addr = Ipv4Addr::new(239, 192, 76, 84);
 
+/// Maximum number of received packets waiting for the SCC
+const RX_QUEUE_LIMIT: usize = 64;
+
 /// Maximum LLAP packet size (3 byte header + 597 byte data)
 pub const MAX_LLAP_SIZE: usize = 600;
 
@@ -270,16 +273,11 @@ impl LocalTalkBridge {
 
         let dest = llap[0];
 
-        // Z8530 SDLC address search mode = hardware destination filter
-        // When ON: only accept our address + broadcast
-        // When OFF: accept all packets (Mac firmware handles its own filtering)
-        if self.address_search_mode
-            && self.node_address != 0
-            && dest != self.node_address
-            && dest != 0xFF
-        {
-            return; // Not for us, drop
-        }
+        // Destination filtering (Z8530 SDLC address search mode) is done by
+        // the SCC when it picks up the frame: the station address and search
+        // mode can change between now and then (LLAP address acquisition
+        // toggles them around every transmission), so filtering here with a
+        // stale view would let foreign frames through or drop wanted ones.
 
         let ptype = llap[2];
         let src = llap[1];
@@ -295,7 +293,11 @@ impl LocalTalkBridge {
             self.send_udp(&ack);
         }
 
-        // Queue the packet for injection into SCC
+        // Queue the packet for injection into SCC (bounded: a guest that
+        // keeps its receiver off must not make the queue grow forever)
+        if self.rx_queue.len() >= RX_QUEUE_LIMIT {
+            self.rx_queue.remove(0);
+        }
         self.rx_queue.push(llap.to_vec());
         self.rx_packets += 1;
     }
@@ -428,56 +430,31 @@ mod tests {
     }
 
     #[test]
-    fn test_rx_filter_address_search_mode() {
+    fn test_rx_queues_everything_for_the_scc() {
         let Some(mut bridge) = test_bridge() else {
             return;
         };
 
+        // Destination filtering is the SCC's job (at frame pickup time)
         bridge.set_node_address(42);
         bridge.set_address_search_mode(true);
-
-        // Packet for our address should be accepted
         bridge.handle_rx_packet(&[42, 10, 0x01]);
-        assert_eq!(bridge.rx_queue.len(), 1);
-
-        // Broadcast should be accepted
         bridge.handle_rx_packet(&[0xFF, 10, 0x01]);
-        assert_eq!(bridge.rx_queue.len(), 2);
-
-        // Packet for different address should be dropped
         bridge.handle_rx_packet(&[99, 10, 0x01]);
-        assert_eq!(bridge.rx_queue.len(), 2);
+        assert_eq!(bridge.rx_queue.len(), 3);
     }
 
     #[test]
-    fn test_rx_no_filter_when_search_mode_off() {
+    fn test_rx_queue_is_bounded() {
         let Some(mut bridge) = test_bridge() else {
             return;
         };
-
-        bridge.set_node_address(42);
-        bridge.set_address_search_mode(false);
-
-        // All packets should be accepted when address search mode is off
-        bridge.handle_rx_packet(&[99, 10, 0x01]);
-        assert_eq!(bridge.rx_queue.len(), 1);
-
-        bridge.handle_rx_packet(&[42, 10, 0x01]);
-        assert_eq!(bridge.rx_queue.len(), 2);
-    }
-
-    #[test]
-    fn test_rx_no_filter_when_no_address() {
-        let Some(mut bridge) = test_bridge() else {
-            return;
-        };
-
-        // node_address = 0 (not yet assigned), search mode on
-        bridge.set_address_search_mode(true);
-
-        // All packets should be accepted when we have no address yet
-        bridge.handle_rx_packet(&[99, 10, 0x01]);
-        assert_eq!(bridge.rx_queue.len(), 1);
+        for i in 0..RX_QUEUE_LIMIT + 10 {
+            bridge.handle_rx_packet(&[0xFF, i as u8, 0x01]);
+        }
+        assert_eq!(bridge.rx_queue.len(), RX_QUEUE_LIMIT);
+        // The oldest packets were dropped
+        assert_eq!(bridge.read_to_scc().unwrap()[1], 10);
     }
 
     #[test]
