@@ -20,6 +20,10 @@ use serde::{Deserialize, Serialize};
 use snow_nat::NatEngineStats;
 
 use crate::emulator::comm::EthernetCaptureStatus;
+#[cfg(target_os = "emscripten")]
+use crate::emulator::EmuContext;
+#[cfg(target_os = "emscripten")]
+use crate::tickable::Ticks;
 use std::path::{Path, PathBuf};
 #[cfg(all(feature = "ethernet_tap", target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
@@ -35,6 +39,7 @@ use std::thread::JoinHandle;
 type BasicPacket = Vec<u8>;
 
 /// Maximum amount of packets to buffer in the RX/TX queues
+#[allow(dead_code)] // Used by link backends that are not compiled in all configurations
 const PACKET_QUEUE_SIZE: usize = 512;
 
 /// Locally administered MAC address of the NAT gateway visible from the emulated Mac.
@@ -88,17 +93,28 @@ pub enum EthernetLinkType {
     /// Tap interface based bridge
     #[cfg(all(feature = "ethernet_tap", target_os = "linux"))]
     TapBridge(String),
+    /// Frontend-provided link through the net hub (web builds; the page
+    /// relays frames to the `snow-bridge` process, which runs the NAT engine
+    /// on the host machine)
+    #[cfg(target_os = "emscripten")]
+    Frontend,
 }
 
 // Clippy is wrong, I don't think you can conditionally tag #[default] on an enum based on features
 #[allow(clippy::derivable_impls)]
 impl Default for EthernetLinkType {
     fn default() -> Self {
-        #[cfg(feature = "ethernet_nat")]
+        // On the web, the net hub link is the default (frames are dropped
+        // while the frontend reports the link as down)
+        #[cfg(target_os = "emscripten")]
+        {
+            Self::Frontend
+        }
+        #[cfg(all(not(target_os = "emscripten"), feature = "ethernet_nat"))]
         {
             Self::NAT
         }
-        #[cfg(not(feature = "ethernet_nat"))]
+        #[cfg(all(not(target_os = "emscripten"), not(feature = "ethernet_nat")))]
         {
             Self::Down
         }
@@ -131,6 +147,15 @@ struct PcapCaptureState {
     thread_handle: Option<JoinHandle<()>>,
 }
 
+/// Channel endpoints for the web network bridge (web builds)
+#[cfg(target_os = "emscripten")]
+struct WebLinkEndpoints {
+    /// Frames from the guest transmit queue
+    from_guest: crossbeam_channel::Receiver<BasicPacket>,
+    /// Frames for the guest receive queue
+    to_guest: crossbeam_channel::Sender<BasicPacket>,
+}
+
 /// DaynaPORT SCSI/Link Ethernet adapter
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ScsiTargetEthernet {
@@ -150,6 +175,11 @@ pub(crate) struct ScsiTargetEthernet {
     /// Link type
     #[serde(skip)]
     link: EthernetLinkType,
+
+    /// Web network bridge endpoints (web builds)
+    #[cfg(target_os = "emscripten")]
+    #[serde(skip)]
+    web: Option<WebLinkEndpoints>,
 
     /// NAT engine statistics
     #[cfg(feature = "ethernet_nat")]
@@ -202,6 +232,8 @@ impl Default for ScsiTargetEthernet {
             tx: None,
             rx: None,
             link: Default::default(),
+            #[cfg(target_os = "emscripten")]
+            web: None,
             #[cfg(feature = "ethernet_nat")]
             nat_stats: None,
             enabled: false,
@@ -703,12 +735,51 @@ impl ScsiTargetEthernet {
             let _ = file.flush();
         })
     }
+
+    /// Set up the web network bridge link (web builds)
+    #[cfg(target_os = "emscripten")]
+    fn start_web_link(&mut self) {
+        let (guest_tx, from_guest) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
+        let (to_guest, guest_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
+        self.tx = Some(guest_tx);
+        self.rx = Some(guest_rx);
+        self.web = Some(WebLinkEndpoints { from_guest, to_guest });
+
+    }
+
+    /// Drive the web bridge: guest TX -> bridge, bridge -> guest RX
+    #[cfg(target_os = "emscripten")]
+    fn pump_web(&mut self) {
+        let Some(web) = self.web.as_mut() else {
+            return;
+        };
+
+        // Guest transmit queue -> frontend
+        while let Ok(frame) = web.from_guest.try_recv() {
+            crate::net::send(crate::net::TAG_ETHERNET, &frame);
+        }
+
+        // Frontend -> guest receive queue
+        while let Some(frame) = crate::net::recv(crate::net::TAG_ETHERNET) {
+            if web.to_guest.try_send(frame).is_err() {
+                log::debug!("dropped bridge frame: guest RX queue full");
+            }
+        }
+    }
+
 }
 
 #[typetag::serde]
 impl ScsiTarget for ScsiTargetEthernet {
     fn common(&mut self) -> &mut ScsiTargetCommon {
         &mut self.common
+    }
+
+    /// Periodic processing: on the web, pump the network bridge
+    #[cfg(target_os = "emscripten")]
+    fn tick(&mut self, _ticks: Ticks, _ctx: &dyn EmuContext) -> Result<()> {
+        self.pump_web();
+        Ok(())
     }
 
     #[cfg(feature = "savestates")]
@@ -987,6 +1058,11 @@ impl ScsiTarget for ScsiTargetEthernet {
             EthernetLinkType::Down => {
                 log::info!("Ethernet link down");
             }
+            #[cfg(target_os = "emscripten")]
+            EthernetLinkType::Frontend => {
+                log::info!("Ethernet link: frontend network bridge");
+                self.start_web_link();
+            }
             #[cfg(feature = "ethernet_raw")]
             EthernetLinkType::Bridge(i) => {
                 log::info!("Ethernet link bridge to interface {}", i);
@@ -997,7 +1073,7 @@ impl ScsiTarget for ScsiTargetEthernet {
                 log::info!("Ethernet link TAP bridge: {}", name);
                 self.start_tap_bridge(name)?;
             }
-            #[cfg(feature = "ethernet_nat")]
+            #[cfg(all(feature = "ethernet_nat", not(target_os = "emscripten")))]
             EthernetLinkType::NAT => {
                 let (nat_tx, emulator_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
                 let (emulator_tx, nat_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
@@ -1018,7 +1094,7 @@ impl ScsiTarget for ScsiTargetEthernet {
                     nat.run();
                 });
             }
-            #[cfg(feature = "ethernet_nat_https_stripping")]
+            #[cfg(all(feature = "ethernet_nat_https_stripping", not(target_os = "emscripten")))]
             EthernetLinkType::NATHttpsStripping => {
                 let (nat_tx, emulator_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
                 let (emulator_tx, nat_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
@@ -1063,9 +1139,9 @@ impl ScsiTarget for ScsiTargetEthernet {
 impl Debuggable for ScsiTargetEthernet {
     fn get_debug_properties(&self) -> DebuggableProperties {
         use crate::debuggable::*;
-        use crate::{dbgprop_bool, dbgprop_string, dbgprop_udec};
+        use crate::{dbgprop_bool, dbgprop_group, dbgprop_string, dbgprop_udec};
         #[cfg(feature = "ethernet_nat")]
-        use crate::{dbgprop_group, dbgprop_str};
+        use crate::dbgprop_str;
 
         let mut result = vec![
             dbgprop_string!(
@@ -1082,6 +1158,9 @@ impl Debuggable for ScsiTargetEthernet {
             ),
             dbgprop_bool!("Interface enabled", self.enabled),
         ];
+
+        #[cfg(target_os = "emscripten")]
+        result.push(dbgprop_string!("Network bridge", crate::net::status()));
 
         if let Some(tx) = &self.tx {
             result.push(dbgprop_udec!("TX queue length", tx.len()));

@@ -1,7 +1,7 @@
 //! LocalTalk over UDP (LToUDP) bridge
 //!
-//! This module implements the LocalTalk over UDP protocol, allowing emulated Macs
-//! to communicate with each other over a LAN using UDP multicast.
+//! This module implements the LocalTalk-over-UDP protocol, allowing emulated
+//! Macs to communicate with each other over a LAN using UDP multicast.
 //!
 //! Protocol specification: https://windswept.home.blog/2019/12/10/localtalk-over-udp/
 //!
@@ -9,19 +9,29 @@
 //! - UDP port 1954, multicast group 239.192.76.84
 //! - Packets are LLAP frames prefixed with a 4-byte sender ID
 //! - RTS/CTS collision avoidance is handled locally (not sent over network)
+//!
+//! The wire transport is abstracted behind the [`LtopIo`] trait:
+//! - Native builds use a local UDP socket joined to the multicast group.
+//! - Web (Emscripten) builds exchange the datagrams with the frontend through
+//!   the net hub ([`crate::net`], [`HubTransport`]); the web page relays them
+//!   to the `snow-bridge` host process over a WebSocket, so browser instances
+//!   can AppleTalk with each other and with real Macs on the LAN.
 
 use std::collections::VecDeque;
 use std::io;
+
+#[cfg(not(target_os = "emscripten"))]
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+#[cfg(not(target_os = "emscripten"))]
+use socket2::{Domain, Protocol, Socket, Type};
 
 use log::*;
-use socket2::{Domain, Protocol, Socket, Type};
 
 /// LocalTalk over UDP port
 pub const LTOUDP_PORT: u16 = 1954;
 
-/// LocalTalk over UDP multicast address
-pub const LTOUDP_MULTICAST: Ipv4Addr = Ipv4Addr::new(239, 192, 76, 84);
+/// LocalTalk over UDP multicast address (239.192.76.84)
+pub const LTOUDP_MULTICAST: [u8; 4] = [239, 192, 76, 84];
 
 /// Maximum number of received packets waiting for the SCC
 const RX_QUEUE_LIMIT: usize = 64;
@@ -90,11 +100,108 @@ impl std::fmt::Display for LocalTalkStatus {
     }
 }
 
-/// LocalTalk over UDP bridge
-pub struct LocalTalkBridge {
-    /// UDP socket for multicast communication
+/// Transport for LToUDP datagrams
+///
+/// A complete LToUDP datagram is a 4-byte (big endian) sender ID followed by
+/// the LLAP packet, exactly as it appears on the LToUDP wire.
+pub trait LtopIo: Send {
+    /// Send a complete LToUDP datagram
+    fn send(&mut self, datagram: &[u8]) -> io::Result<usize>;
+
+    /// Non-blocking receive of one LToUDP datagram.
+    ///
+    /// Returns the number of bytes read, `0` when no datagram is available
+    /// right now, or an error.
+    fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+
+    /// Whether the transport is currently connected/usable
+    fn is_connected(&self) -> bool;
+}
+
+/// UDP multicast transport (native platforms)
+#[cfg(not(target_os = "emscripten"))]
+struct UdpTransport {
     socket: UdpSocket,
-    /// Sender ID for loopback detection (typically process ID)
+}
+
+#[cfg(not(target_os = "emscripten"))]
+impl UdpTransport {
+    /// Bind the LToUDP port and join the multicast group
+    fn bind() -> io::Result<Self> {
+        // Create UDP socket with socket2 so we can set options before binding
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+
+        // Enable address reuse for multiple instances on same machine
+        socket.set_reuse_address(true)?;
+        #[cfg(not(target_os = "windows"))]
+        if let Err(e) = socket.set_reuse_port(true) {
+            warn!("SO_REUSEPORT failed: {}", e);
+        }
+
+        let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, LTOUDP_PORT);
+        socket.bind(&addr.into())?;
+
+        let socket: UdpSocket = socket.into();
+        socket.join_multicast_v4(&Ipv4Addr::from(LTOUDP_MULTICAST), &Ipv4Addr::UNSPECIFIED)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self { socket })
+    }
+}
+
+#[cfg(not(target_os = "emscripten"))]
+impl LtopIo for UdpTransport {
+    fn send(&mut self, datagram: &[u8]) -> io::Result<usize> {
+        let dest = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(LTOUDP_MULTICAST), LTOUDP_PORT));
+        self.socket.send_to(datagram, dest)
+    }
+
+    fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.socket.recv_from(buf) {
+            Ok((n, _)) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        true
+    }
+}
+
+/// Net hub transport: datagrams are exchanged with the frontend through
+/// [`crate::net`] (used by the web build, where the page relays them to the
+/// host bridge process over a WebSocket)
+pub struct HubTransport;
+
+impl LtopIo for HubTransport {
+    fn send(&mut self, datagram: &[u8]) -> io::Result<usize> {
+        // The hub drops the datagram if the link is down, like an
+        // unplugged LocalTalk cable
+        crate::net::send(crate::net::TAG_LOCALTALK, datagram);
+        Ok(datagram.len())
+    }
+
+    fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match crate::net::recv(crate::net::TAG_LOCALTALK) {
+            None => Ok(0),
+            Some(dgram) => {
+                let n = dgram.len().min(buf.len());
+                buf[..n].copy_from_slice(&dgram[..n]);
+                Ok(n)
+            }
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        crate::net::is_connected()
+    }
+}
+
+/// LocalTalk bridge
+pub struct LocalTalkBridge {
+    /// Wire transport (UDP multicast on native, the net hub on the web)
+    transport: Box<dyn LtopIo>,
+    /// Sender ID for loopback detection (unique per node)
     sender_id: u32,
     /// Our node address (set from SCC WR6, also learned from outgoing packets)
     node_address: u8,
@@ -114,50 +221,44 @@ pub struct LocalTalkBridge {
 }
 
 impl LocalTalkBridge {
-    /// Create a new LocalTalk bridge
+    /// Create a new LocalTalk bridge using the platform's default transport
+    /// (UDP multicast on native platforms, the net hub on the web)
     pub fn new() -> io::Result<Self> {
-        // Create UDP socket with socket2 so we can set options before binding
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-
-        // Enable address reuse for multiple instances on same machine
-        socket.set_reuse_address(true)?;
-        #[cfg(not(target_os = "windows"))]
-        if let Err(e) = socket.set_reuse_port(true) {
-            warn!("SO_REUSEPORT failed: {}", e);
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            Ok(Self::with_transport(
+                Box::new(UdpTransport::bind()?),
+                std::process::id(),
+                "LToUDP",
+            ))
         }
 
-        // Bind to the LToUDP port
-        let addr: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, LTOUDP_PORT);
-        socket.bind(&addr.into())?;
+        #[cfg(target_os = "emscripten")]
+        {
+            // Random sender ID: separate browser tabs must not filter each
+            // other's packets as loopback
+            Ok(Self::with_transport(
+                Box::new(HubTransport),
+                rand::random(),
+                "LToUDP via network bridge",
+            ))
+        }
+    }
 
-        // Convert to std UdpSocket
-        let socket: UdpSocket = socket.into();
-
-        // Join the multicast group
-        socket.join_multicast_v4(&LTOUDP_MULTICAST, &Ipv4Addr::UNSPECIFIED)?;
-
-        // Set non-blocking for polling
-        socket.set_nonblocking(true)?;
-
-        // Use process ID as sender ID for loopback detection
-        let sender_id = std::process::id();
-
-        info!(
-            "LocalTalk bridge started on port {}, multicast {}, sender_id={}",
-            LTOUDP_PORT, LTOUDP_MULTICAST, sender_id
-        );
-
-        Ok(Self {
-            socket,
+    /// Create a LocalTalk bridge on top of a specific transport
+    pub fn with_transport(transport: Box<dyn LtopIo>, sender_id: u32, name: &str) -> Self {
+        info!("LocalTalk bridge started ({name}), sender_id={sender_id:08X}");
+        Self {
+            transport,
             sender_id,
             node_address: 0,
             address_search_mode: false,
             pending_cts: VecDeque::new(),
-            tx_buffer: Vec::with_capacity(MAX_LLAP_SIZE),
             rx_queue: Vec::new(),
+            tx_buffer: Vec::new(),
             tx_packets: 0,
             rx_packets: 0,
-        })
+        }
     }
 
     /// Get current bridge status
@@ -167,6 +268,11 @@ impl LocalTalkBridge {
             tx_packets: self.tx_packets,
             rx_packets: self.rx_packets,
         }
+    }
+
+    /// Whether the underlying transport is connected
+    pub fn is_connected(&self) -> bool {
+        self.transport.is_connected()
     }
 
     /// Handle a complete LLAP packet from the SCC TX path
@@ -203,41 +309,40 @@ impl LocalTalkBridge {
                 // Don't send CTS over network
             }
             _ => {
-                // All other packets (data, ENQ, ACK) are sent over UDP
-                self.send_udp(llap);
+                // All other packets (data, ENQ, ACK) are sent over the wire
+                self.send_wire(llap);
             }
         }
     }
 
-    /// Send an LLAP packet over UDP multicast
-    fn send_udp(&mut self, llap: &[u8]) {
-        // Build UDP packet: 4-byte sender ID (big-endian) + LLAP data
+    /// Send an LLAP packet over the wire (with sender ID prefix)
+    fn send_wire(&mut self, llap: &[u8]) {
+        // Build datagram: 4-byte sender ID (big-endian) + LLAP data
         let mut packet = Vec::with_capacity(4 + llap.len());
         packet.extend_from_slice(&self.sender_id.to_be_bytes());
         packet.extend_from_slice(llap);
 
-        let dest = SocketAddr::V4(SocketAddrV4::new(LTOUDP_MULTICAST, LTOUDP_PORT));
-
-        match self.socket.send_to(&packet, dest) {
+        match self.transport.send(&packet) {
             Ok(_) => {
                 self.tx_packets += 1;
             }
             Err(e) => {
-                warn!("LocalTalk: UDP send error: {}", e);
+                warn!("LocalTalk: send error: {}", e);
             }
         }
     }
 
-    /// Poll for incoming UDP packets and state changes
+    /// Poll for incoming datagrams and state changes
     /// Returns true if there's data available for the SCC
     pub fn poll(&mut self) -> bool {
         let mut buf = [0u8; 4 + MAX_LLAP_SIZE + 64]; // Extra space for safety
         let mut received_any = false;
 
-        // Receive all pending UDP packets
+        // Receive all pending datagrams
         loop {
-            match self.socket.recv_from(&mut buf) {
-                Ok((len, _)) => {
+            match self.transport.recv(&mut buf) {
+                Ok(0) => break, // No data available right now
+                Ok(len) => {
                     if len < 4 + 3 {
                         // Too small: need at least sender_id (4) + LLAP header (3)
                         continue;
@@ -256,11 +361,8 @@ impl LocalTalkBridge {
                     self.handle_rx_packet(llap);
                     received_any = true;
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    break;
-                }
                 Err(e) => {
-                    warn!("LocalTalk: UDP recv error: {}", e);
+                    warn!("LocalTalk: recv error: {}", e);
                     break;
                 }
             }
@@ -294,7 +396,7 @@ impl LocalTalkBridge {
             && !self.address_search_mode
         {
             let ack = vec![src, self.node_address, 0x82];
-            self.send_udp(&ack);
+            self.send_wire(&ack);
         }
 
         // Queue the packet for injection into SCC (bounded: a guest that
@@ -420,10 +522,78 @@ impl LocalTalkBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net;
+    use crate::net::tests::HUB_TEST_LOCK;
 
-    /// Create a bridge for testing (may fail if UDP port is in use)
+    const SENDER: u32 = 0x1234_5678;
+
+    /// Create a bridge on the net hub transport (no sockets needed)
     fn test_bridge() -> Option<LocalTalkBridge> {
-        LocalTalkBridge::new().ok()
+        Some(LocalTalkBridge::with_transport(
+            Box::new(HubTransport),
+            SENDER,
+            "test",
+        ))
+    }
+
+    #[test]
+    fn test_hub_tx_prefixes_sender_id() {
+        let _guard = HUB_TEST_LOCK.lock().unwrap();
+        net::reset();
+        net::set_link(true, "test");
+        let mut bridge = test_bridge().unwrap();
+
+        // ENQ for node 0x4F (what System 6 sends while acquiring an address)
+        bridge.send_frame(&[0x4F, 0x4F, 0x81]);
+        // RTS/CTS are handled locally and never reach the wire
+        bridge.send_frame(&[0x10, 0x4F, 0x84]);
+
+        let out = net::take_outgoing();
+        assert_eq!(
+            out,
+            vec![(net::TAG_LOCALTALK, vec![0x12, 0x34, 0x56, 0x78, 0x4F, 0x4F, 0x81])]
+        );
+        assert_eq!(bridge.status().tx_packets, 1);
+        net::reset();
+    }
+
+    #[test]
+    fn test_hub_rx_filters_own_datagrams() {
+        let _guard = HUB_TEST_LOCK.lock().unwrap();
+        net::reset();
+        net::set_link(true, "test");
+        let mut bridge = test_bridge().unwrap();
+
+        // Our own datagram echoed back (multicast loopback) is ignored
+        net::deliver(net::TAG_LOCALTALK, vec![0x12, 0x34, 0x56, 0x78, 0xFF, 0x4F, 0x01]);
+        // Another node's broadcast, plus a runt, plus a second datagram
+        net::deliver(net::TAG_LOCALTALK, vec![0, 0, 0, 1, 0xFF, 0x20, 0x01, 0xAA]);
+        net::deliver(net::TAG_LOCALTALK, vec![0, 0, 0, 1, 0xFF]);
+        net::deliver(net::TAG_LOCALTALK, vec![0, 0, 0, 1, 0xFF, 0x21, 0x01, 0xBB]);
+
+        assert!(bridge.poll());
+        assert_eq!(bridge.read_to_scc().unwrap(), [0xFF, 0x20, 0x01, 0xAA]);
+        assert_eq!(bridge.read_to_scc().unwrap(), [0xFF, 0x21, 0x01, 0xBB]);
+        assert!(bridge.read_to_scc().is_none());
+        net::reset();
+    }
+
+    #[test]
+    fn test_hub_answers_enq_for_our_address() {
+        let _guard = HUB_TEST_LOCK.lock().unwrap();
+        net::reset();
+        net::set_link(true, "test");
+        let mut bridge = test_bridge().unwrap();
+        bridge.set_node_address(0x4F);
+
+        // Another node probes for our address: we must ACK ("taken")
+        net::deliver(net::TAG_LOCALTALK, vec![0, 0, 0, 9, 0x4F, 0x4F, 0x81]);
+        bridge.poll();
+        assert_eq!(
+            net::take_outgoing(),
+            vec![(net::TAG_LOCALTALK, vec![0x12, 0x34, 0x56, 0x78, 0x4F, 0x4F, 0x82])]
+        );
+        net::reset();
     }
 
     #[test]

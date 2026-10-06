@@ -13,7 +13,6 @@ use crate::tickable::Ticks;
 pub mod adb;
 pub mod asc;
 pub mod compact;
-#[cfg(not(target_os = "emscripten"))]
 pub mod localtalk_bridge;
 pub mod macii;
 pub mod nubus;
