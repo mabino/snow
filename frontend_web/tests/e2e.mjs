@@ -167,6 +167,14 @@ try {
         const final = sb.probed[sb.probed.length - 1];
         if (sb.probed.length < 2 || final === NODE) fail(`B should have moved off node ${NODE}, probed ${sb.probed}`);
         else console.log(`collision resolved: A is node ${NODE}, B moved to node ${final}`);
+
+        // Once on the network, B broadcasts AppleTalk traffic (RTMP, NBP
+        // name registration); A must receive it from B's new address
+        const seen = await waitFor("A receiving AppleTalk (DDP) traffic from B", async () => {
+            const s = await stats(a);
+            return s.nodes.includes(final) ? s : null;
+        }, 30000).catch((err) => fail(err.message));
+        if (seen) console.log(`A received ${seen.llap.in.data} DDP frames; AppleTalk nodes seen by A: ${seen.nodes}`);
     }
 
     if (process.env.E2E_SHOTS) {
