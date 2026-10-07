@@ -213,6 +213,12 @@ function noteLocalTalk(dgram, dir) {
             stats.probed.push(dgram[4]);
         }
     }
+    // With ?debug=1, keep a hex dump of the last data frames
+    if (params.get("debug") === "1" && dgram.length >= 7 && dgram[6] < 0x80) {
+        stats.dump = stats.dump || [];
+        stats.dump.push(`${Math.round(performance.now())} ${dir} ${[...dgram.subarray(4)].map((b) => b.toString(16).padStart(2, "0")).join("")}`);
+        if (stats.dump.length > 200) stats.dump.shift();
+    }
     // Run-length log of the last frames (for diagnostics/tests)
     if (dgram.length >= 7) {
         const key = `${dir} ${[4, 5, 6].map((i) => dgram[i].toString(16).padStart(2, "0")).join(" ")} len=${dgram.length - 4}`;

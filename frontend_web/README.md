@@ -13,7 +13,8 @@ open http://localhost:8080/
 
 URL parameters for scripted use: `rom=<url>`, `disk=<url>` (repeatable),
 `model=<gestalt id>`, `node=<LocalTalk node hint>`, `ethernet=1`,
-`localtalk=0`, `bridge=<ws url>`, `autostart=1`.
+`localtalk=0`, `bridge=<ws url>`, `autostart=1`, `debug=1` (keeps a hex dump of
+recent AppleTalk data frames in `window.snow.stats.dump`).
 
 ## How it fits together
 
