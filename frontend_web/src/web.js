@@ -45,6 +45,25 @@ mergeInto(LibraryManager.library, {
         }
     },
 
+    // CSP-safe replacement for Emscripten's emscripten_run_script_string,
+    // which runs eval(). The page's Content Security Policy forbids eval;
+    // the only callers (the chrono and jiff crates, through iana-time-zone)
+    // ask for the browser's time zone, so answer that without eval and
+    // refuse anything else.
+    emscripten_run_script_string__deps: ["$stringToNewUTF8"],
+    emscripten_run_script_string(ptr) {
+        const script = UTF8ToString(ptr);
+        if (script !== "Intl.DateTimeFormat().resolvedOptions().timeZone") {
+            console.warn("snow web: refusing to evaluate script: " + script);
+            return 0;
+        }
+        if (!self.__snowTimeZonePtr) {
+            const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+            self.__snowTimeZonePtr = stringToNewUTF8(zone);
+        }
+        return self.__snowTimeZonePtr;
+    },
+
     web_js_init__deps: ["$snowState"],
     web_js_init() {
         snowState();
