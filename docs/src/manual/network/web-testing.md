@@ -27,7 +27,8 @@ and two browser tabs or browsers connected to one `snow-bridge`.
    http://127.0.0.1:8080/?rom=media/<rom>&disk=media/<system 6 disk>&disk=media/NetworkApps.dsk
    ```
 
-   Use `127.0.0.1` rather than `localhost`. The bar under the screen shows
+   Both pages join the room `default`; add `&room=<name>` to both for a
+   separate network. Use `127.0.0.1` rather than `localhost`. The bar under the screen shows
    LocalTalk frames sent and received and the AppleTalk nodes seen; with
    `&debug=1`, recent data frames are kept as hex in `window.snow.stats.dump`.
 
@@ -46,6 +47,7 @@ refuse duplicate names, so give each Mac its own name as described below.
 | 6 | **EZChat**, see below | Messages typed on either Mac appear on both |
 | 7 | **Bolo**, see below | Both Macs play in the same game; the Players menu lists both |
 | 8 | Boot a second Mac with `&node=N` set to the first Mac's address | The second Mac's address enquiries are answered by the first and it moves to another address (this is also the automated end-to-end test) |
+| 9 | Open the second browser with a different `&room=` | The Macs are on separate networks: neither browser's "in" counter moves when the other Mac sends |
 
 ### EZChat (chat)
 

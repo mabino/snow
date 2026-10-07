@@ -8,11 +8,11 @@ documentation: [docs/src/manual/network/web.md](../docs/src/manual/network/web.m
 ```sh
 ./build-web.sh                                          # builds www/snow_web.{js,wasm}
 cargo run --release -p snow_bridge -- --www frontend_web/www
-open http://localhost:8080/
+open http://127.0.0.1:8080/
 ```
 
 URL parameters for scripted use: `rom=<url>`, `disk=<url>` (repeatable),
-`model=<gestalt id>`, `node=<LocalTalk node hint>`, `ethernet=1`,
+`model=<gestalt id>`, `room=<name>` (AppleTalk network to join, default `default`), `node=<LocalTalk node hint>`, `ethernet=1`,
 `localtalk=0`, `bridge=<ws url>`, `autostart=1`, `debug=1` (keeps a hex dump of
 recent AppleTalk data frames in `window.snow.stats.dump`).
 
@@ -35,9 +35,15 @@ recent AppleTalk data frames in `window.snow.stats.dump`).
 - In the core, the LocalTalk bridge and the DaynaPORT adapter exchange
   packets with `snow_core::net`, a frontend-provided transport; on native
   builds they use UDP multicast and the NAT engine directly instead.
-- `snow-bridge` relays LocalTalk datagrams between tabs and the LToUDP
-  multicast group, and runs one NAT engine per tab for Ethernet. Wire
-  format: `[tag u8][length u16 BE][payload]`, tag 0 = Ethernet, 1 = LToUDP.
+- `snow-bridge` relays LocalTalk datagrams between the tabs of a room
+  (`/bridge/<room>`), optionally to the LToUDP multicast group (`--lan`),
+  and optionally runs one NAT engine per tab for Ethernet (`--ethernet`).
+  Wire format: `[tag u8][length u16 BE][payload]`, tag 0 = Ethernet,
+  1 = LToUDP. Its defaults are safe (loopback, no LAN, no NAT, same-origin,
+  limits); see the [options](../docs/src/manual/network/web.md#snow-bridge-options-and-safe-defaults).
+- The page runs under a strict Content Security Policy (no inline script,
+  no `eval`): its logic lives in `www/app.js`, and `src/web.js` replaces
+  Emscripten's `eval`-based `emscripten_run_script_string`.
 - `src/media.rs` makes bare HFS volumes bootable (SCSI driver headers in
   `assets/`, the same ones Infinite Mac uses) and generates a PRAM with
   AppleTalk active and a random node address hint.
