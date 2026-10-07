@@ -2,6 +2,8 @@ use disk::JsDiskImage;
 use floppy::load_floppy_image;
 use snow_core::emulator::comm::{EmulatorCommand, EmulatorEvent, EmulatorStatus, UserMessageType};
 use snow_core::emulator::{Emulator, MouseMode};
+use snow_core::mac::scc::SccCh;
+use snow_core::mac::serial_bridge::SerialBridgeConfig;
 use snow_core::mac::{ExtraROMs, MacModel, MacMonitor};
 use snow_core::tickable::Tickable;
 use std::path::Path;
@@ -19,6 +21,7 @@ mod floppy_manager;
 mod framebuffer;
 mod input;
 mod js_api;
+mod localtalk;
 mod memory;
 mod removable_media;
 
@@ -39,6 +42,8 @@ fn main() {
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
     let extra_rom_paths: Vec<String> = args.values_from_str("--extra-rom").unwrap_or_default();
     let pram_path: Option<String> = args.opt_value_from_str("--pram").unwrap();
+    // AppleTalk over LocalTalk (printer port), relayed by Infinite Mac's zone
+    let localtalk = args.contains("--localtalk");
     let debug_log = args.contains("--debug-log");
     let mouse_mode = if args.contains("--use-mouse-deltas") {
         MouseMode::RelativeHw
@@ -106,6 +111,12 @@ fn main() {
     .expect("Failed to create emulator");
     if let Some(pram_path) = pram_path {
         emulator.persist_pram(Path::new(&pram_path));
+    } else if localtalk {
+        const PRAM_PATH: &str = "/appletalk.pram";
+        match std::fs::write(PRAM_PATH, localtalk::appletalk_pram()) {
+            Ok(()) => emulator.persist_pram(Path::new(PRAM_PATH)),
+            Err(err) => log::error!("Failed to create AppleTalk PRAM: {}", err),
+        }
     }
     emulator.set_pram_logging(debug_log);
     emulator.set_shared_dirs(
@@ -204,6 +215,15 @@ fn main() {
             }
         }
     }
+    let mut localtalk_link = localtalk.then(|| {
+        cmd_sender
+            .send(EmulatorCommand::SerialBridgeEnable(
+                SccCh::B,
+                SerialBridgeConfig::LocalTalk,
+            ))
+            .unwrap();
+        localtalk::LocalTalkLink::start()
+    });
     cmd_sender.send(EmulatorCommand::Run).unwrap();
 
     let mut framebuffer_sender = framebuffer::Sender::new(frame_receiver);
@@ -253,6 +273,10 @@ fn main() {
         }
 
         framebuffer_sender.tick();
+
+        if let Some(link) = localtalk_link.as_mut() {
+            link.tick();
+        }
     }
 }
 

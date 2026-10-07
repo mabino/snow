@@ -82,6 +82,17 @@ mergeInto(LibraryManager.library, {
         _free(ptr);
     },
 
+    // Ethernet (Infinite Mac's AppleTalk zone relay), used for LocalTalk
+    js_ether_init(macAddressPtr) {
+        workerApi.etherInit(UTF8ToString(macAddressPtr));
+    },
+    js_ether_write(destinationPtr, bufPtr, bufSize) {
+        workerApi.etherWrite(UTF8ToString(destinationPtr), bufPtr, bufSize);
+    },
+    js_ether_read(bufPtr, bufSize) {
+        return workerApi.etherRead(bufPtr, bufSize);
+    },
+
     // Input
     js_acquire_input_lock() {
         return workerApi.acquireInputLock();
