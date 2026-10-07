@@ -4987,6 +4987,7 @@ dependencies = [
  "futures-util",
  "log",
  "pico-args",
+ "rand 0.9.4",
  "snow_core",
  "snow_nat",
  "tokio",

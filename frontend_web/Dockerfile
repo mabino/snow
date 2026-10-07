@@ -3,16 +3,16 @@
 # Build from the repository root:
 #
 #   docker build -f frontend_web/Dockerfile -t snow-web .                 # runtime image
-#   docker run --rm -p 8080:8080 snow-web                                  # http://localhost:8080/
+#   docker run --rm -p 127.0.0.1:8080:8080 snow-web                        # http://127.0.0.1:8080/
 #
 #   docker build -f frontend_web/Dockerfile --target test -t snow-web-test .
 #   docker run --rm snow-web-test                                          # full test suite
 #   docker run --rm -v /path/to/media:/media -e SNOW_ROM=/media/Mac-SE.rom \
 #       -e SNOW_DISK=/media/System6.dsk snow-web-test                       # + AppleTalk e2e
 #
-# The LocalTalk LAN relay (LToUDP multicast) needs host networking
-# (`docker run --network host`); without it, browser tabs connected to the
-# same bridge still network with each other.
+# The LocalTalk LAN relay (`--lan`, LToUDP multicast) needs host networking
+# (`docker run --network host`); without it, browser tabs in the same room
+# still network with each other.
 
 ARG RUST_VERSION=1.95.0
 ARG EMSDK_VERSION=4.0.22
@@ -48,5 +48,8 @@ FROM debian:bookworm-slim AS runtime
 COPY --from=build /src/target/release/snow_bridge /usr/local/bin/snow-bridge
 COPY --from=build /src/frontend_web/www /srv/www
 EXPOSE 8080
-ENTRYPOINT ["snow-bridge", "--www", "/srv/www"]
-CMD ["--port", "8080"]
+# Inside a container the bridge must listen on all interfaces to be
+# reachable through the published port; everything else keeps the safe
+# defaults (no LAN relay, no Ethernet/NAT, same-origin only). Add options
+# after the image name, e.g. `docker run ... snow-web --ethernet`.
+ENTRYPOINT ["snow-bridge", "--www", "/srv/www", "--addr", "0.0.0.0", "--port", "8080"]

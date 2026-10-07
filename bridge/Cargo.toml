@@ -4,18 +4,26 @@ version = "1.5.0"
 edition = "2024"
 description = "Host-side network bridge for the Snow WebAssembly port"
 
+[features]
+# Ethernet support: a NAT engine per client (internet access for the
+# emulated Mac). Still off at runtime unless --ethernet is given; build with
+# --no-default-features to leave it out entirely (e.g. for a public relay).
+default = ["nat"]
+nat = ["dep:snow_nat", "dep:crossbeam-channel"]
+
 [dependencies]
-# No features needed: used for the shared wire protocol (tags + framing)
 anyhow = "1.0"
+# Used for the shared wire protocol (tags + framing) and LToUDP constants
 snow_core = { path = "../core" }
-snow_nat = { path = "../nat", features = ["mactcp_helpers", "https_stripping"] }
+snow_nat = { path = "../nat", features = ["mactcp_helpers", "https_stripping"], optional = true }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs", "io-util"] }
 tokio-tungstenite = "0.27"
 futures-util = "0.3"
-crossbeam-channel = "0.5"
+crossbeam-channel = { version = "0.5", optional = true }
 pico-args = "0.5"
 log = "0.4"
 env_logger = "0.11"
+rand = "0.9"
 
 [lints]
 workspace = true

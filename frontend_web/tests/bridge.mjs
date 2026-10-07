@@ -5,39 +5,74 @@
 //   2. ARP request   -> smoltcp gateway
 //   3. LocalTalk (LToUDP) datagrams relayed between two clients
 //   4. Frame reassembly across WebSocket messages
+//   5. Safe defaults and admission checks: Origin, paths, rooms, limits,
+//      Ethernet off by default, static file security headers
+//   6. NAT egress policy: no access to the host's loopback by default
 //
-// Usage:  node bridge.mjs [ws://host:port]
-// Without a URL, the test starts its own bridge (SNOW_BRIDGE, default
-// ../../target/release/snow_bridge) on a free port, without the LAN relay.
+// Usage:  node bridge.mjs [ws://host:port/bridge]
+// Without a URL, the test starts its own bridges (SNOW_BRIDGE, default
+// ../../target/release/snow_bridge) on free ports: one with --ethernet for
+// tests 1-4, and one with default (safe) settings for the security checks.
 
 import { spawn } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-let URL = process.argv[2];
-let bridgeProcess = null;
-if (!URL) {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const bin = process.env.SNOW_BRIDGE || path.resolve(here, "../../target/release/snow_bridge");
-    const port = await new Promise((resolve) => {
+const here = path.dirname(fileURLToPath(import.meta.url));
+const BRIDGE_BIN = process.env.SNOW_BRIDGE || path.resolve(here, "../../target/release/snow_bridge");
+const WWW = path.resolve(here, "../www");
+
+async function freePort() {
+    return new Promise((resolve) => {
         const srv = net.createServer().listen(0, "127.0.0.1", () => {
             const { port } = srv.address();
             srv.close(() => resolve(port));
         });
     });
-    bridgeProcess = spawn(bin, ["--addr", "127.0.0.1", "--port", String(port), "--no-lan"], {
+}
+
+/// Start a bridge on a free port with extra arguments; returns its port
+async function startBridge(extraArgs) {
+    const port = await freePort();
+    const proc = spawn(BRIDGE_BIN, ["--port", String(port), ...extraArgs], {
         stdio: ["ignore", "ignore", "inherit"],
     });
-    process.on("exit", () => bridgeProcess.kill());
+    process.on("exit", () => proc.kill());
     for (let i = 0; i < 100; i++) {
         const up = await new Promise((resolve) => {
             const s = net.connect(port, "127.0.0.1", () => { s.destroy(); resolve(true); });
             s.on("error", () => resolve(false));
         });
-        if (up) break;
+        if (up) return port;
         await new Promise((r) => setTimeout(r, 100));
     }
+    throw new Error("bridge did not start");
+}
+
+/// Raw WebSocket upgrade request; resolves with the HTTP status line
+function rawUpgrade(port, reqPath, headers = {}) {
+    return new Promise((resolve) => {
+        const s = net.connect(port, "127.0.0.1", () => {
+            const extra = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join("");
+            s.write(`GET ${reqPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\n` +
+                "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" +
+                `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n${extra}\r\n`);
+        });
+        let data = "";
+        s.on("data", (d) => {
+            data += d;
+            if (data.includes("\r\n")) {
+                resolve({ status: data.split("\r\n")[0], socket: s });
+            }
+        });
+        s.on("error", () => resolve({ status: "error", socket: s }));
+    });
+}
+
+let URL = process.argv[2];
+if (!URL) {
+    const port = await startBridge(["--ethernet"]);
     URL = `ws://127.0.0.1:${port}/bridge`;
 }
 
@@ -106,12 +141,67 @@ function arpRequest(clientMac, clientIp, targetIp) {
     return ethFrame(BROADCAST, clientMac, 0x0806, arp(1, 0x0800, 6, 4, 1, clientMac, clientIp, zeroMac(), targetIp));
 }
 
+
+function checksum16(buf) {
+    let sum = 0;
+    for (let i = 0; i + 1 < buf.length; i += 2) sum += buf.readUInt16BE(i);
+    if (buf.length % 2) sum += buf[buf.length - 1] << 8;
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    return ~sum & 0xffff;
+}
+
+/// Ethernet + IPv4 + TCP SYN from the guest (10.0.0.2) to dstIp:dstPort
+function tcpSyn(srcMac, dstIp, dstPort, srcPort = 40000) {
+    const tcp = Buffer.alloc(20);
+    tcp.writeUInt16BE(srcPort, 0);
+    tcp.writeUInt16BE(dstPort, 2);
+    tcp.writeUInt32BE(1000, 4); // sequence number
+    tcp[12] = 5 << 4; // header length
+    tcp[13] = 0x02; // SYN
+    tcp.writeUInt16BE(8192, 14); // window
+    const srcIp = Buffer.from([10, 0, 0, 2]);
+    const pseudo = Buffer.concat([srcIp, dstIp, Buffer.from([0, 6, 0, 20]), tcp]);
+    tcp.writeUInt16BE(checksum16(pseudo), 16);
+    const ip = Buffer.alloc(20);
+    ip[0] = 0x45;
+    ip.writeUInt16BE(40, 2); // total length
+    ip[8] = 64; // TTL
+    ip[9] = 6; // TCP
+    srcIp.copy(ip, 12);
+    dstIp.copy(ip, 16);
+    ip.writeUInt16BE(checksum16(ip), 10);
+    return ethFrame(GW_MAC, srcMac, 0x0800, Buffer.concat([ip, tcp]));
+}
+
+/// Whether a guest TCP connection to a server on this host's loopback gets
+/// through the bridge's NAT; returns [server saw a connection, guest got RST]
+async function probeLoopbackEgress(bridgeUrl) {
+    const server = net.createServer((sock) => { server.hit = true; sock.destroy(); });
+    server.hit = false;
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const port = server.address().port;
+    const c = new Client("egress", bridgeUrl);
+    await c.opened;
+    const mac = Buffer.from("008019123456", "hex");
+    c.sendFrame(TAG_ETHERNET, tcpSyn(mac, Buffer.from([127, 0, 0, 1]), port));
+    let rst = false;
+    try {
+        await c.recvFrame(([t, f]) => t === TAG_ETHERNET && f.length >= 54 &&
+            f.readUInt16BE(12) === 0x0800 && f[23] === 6 && (f[47] & 0x04) !== 0, 3000);
+        rst = true;
+    } catch { /* no reset */ }
+    await new Promise((r) => setTimeout(r, 500));
+    c.close();
+    server.close();
+    return [server.hit, rst];
+}
+
 // -------------------------------------------------------------- ws client
 
 class Client {
-    constructor(name) {
+    constructor(name, url = URL) {
         this.name = name;
-        this.ws = new WebSocket(URL);
+        this.ws = new WebSocket(url);
         // Synchronous data access keeps message processing in arrival order
         this.ws.binaryType = "arraybuffer";
         this.carry = Buffer.alloc(0);
@@ -213,32 +303,32 @@ async function main() {
         Buffer.compare(f.subarray(28, 32), GW_IP) === 0);
     check("arp reply from gateway", true);
 
-    // 3. LocalTalk relay A -> B and B -> A
+    // 3. LocalTalk relay A -> B and B -> A. The bridge replaces the
+    // client-supplied sender ID with its own assignment per client.
     console.log("test 3: LocalTalk relay");
-    const dgramA = Buffer.concat([Buffer.from("aabbccdd", "hex"), Buffer.from([0x01, 0xff, 0x05, 0xde, 0xad])]);
-    const dgramB = Buffer.concat([Buffer.from("11223344", "hex"), Buffer.from([0x02, 0x05, 0xff, 0xbe, 0xef])]);
-    // (Match on the 4-byte sender ID so that stray datagrams from real
-    // LToUDP nodes on the LAN cannot satisfy the waiters.)
-    a.sendFrame(TAG_LOCALTALK, dgramA);
-    const [, gotB] = await b.recvFrame(([t, f]) =>
-        t === TAG_LOCALTALK && f.subarray(0, 4).equals(Buffer.from("aabbccdd", "hex")));
-    check("A->B datagram delivered", Buffer.compare(gotB, dgramA) === 0);
-    b.sendFrame(TAG_LOCALTALK, dgramB);
-    const [, gotA] = await a.recvFrame(([t, f]) =>
-        t === TAG_LOCALTALK && f.subarray(0, 4).equals(Buffer.from("11223344", "hex")));
-    check("B->A datagram delivered", Buffer.compare(gotA, dgramB) === 0);
-    // A's own datagram must NOT be echoed back to A. Match on the sender ID
-    // (aabbccdd) rather than "any LocalTalk frame": a real LToUDP node on
-    // the LAN may legitimately retransmit the broadcast with its own sender
-    // ID, which the bridge correctly forwards.
+    const enqA = Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0x4f, 0x4f, 0x81]);
+    const enqB = Buffer.from([0x11, 0x22, 0x33, 0x44, 0x20, 0x20, 0x81]);
+    a.sendFrame(TAG_LOCALTALK, enqA);
+    const [, gotB] = await b.recvFrame(([t, f]) => t === TAG_LOCALTALK && f[4] === 0x4f);
+    check("A->B datagram delivered", gotB.subarray(4).equals(enqA.subarray(4)));
+    check("sender ID assigned by the bridge", !gotB.subarray(0, 4).equals(enqA.subarray(0, 4)));
+    b.sendFrame(TAG_LOCALTALK, enqB);
+    const [, gotA] = await a.recvFrame(([t, f]) => t === TAG_LOCALTALK && f[4] === 0x20);
+    check("B->A datagram delivered", gotA.subarray(4).equals(enqB.subarray(4)));
     let echoed = false;
     try {
-        await a.recvFrame(([t, f]) =>
-            t === TAG_LOCALTALK &&
-            f.subarray(0, 4).equals(Buffer.from("aabbccdd", "hex")), 1000);
+        await a.recvFrame(([t, f]) => t === TAG_LOCALTALK && f[4] === 0x4f, 1000);
         echoed = true;
     } catch { /* expected */ }
     check("no loopback echo of own datagram", !echoed);
+    // Malformed LLAP (control packet with a payload) is dropped
+    a.sendFrame(TAG_LOCALTALK, Buffer.from([1, 2, 3, 4, 0x55, 0x55, 0x81, 0x00]));
+    let relayedBad = false;
+    try {
+        await b.recvFrame(([t, f]) => t === TAG_LOCALTALK && f[4] === 0x55, 1000);
+        relayedBad = true;
+    } catch { /* expected */ }
+    check("malformed LocalTalk datagram dropped", !relayedBad);
 
     // 4. Frame reassembly across messages (send a RARP request split into
     // two WebSocket messages; the engine's reply proves it was reassembled)
@@ -256,6 +346,78 @@ async function main() {
 
     a.close();
     b.close();
+
+    // 5. Security checks against bridges with default (safe) settings
+    console.log("test 5: safe defaults and admission checks");
+    const port = await startBridge(["--www", WWW, "--max-clients-per-ip", "2"]);
+    const base = `ws://127.0.0.1:${port}/bridge`;
+    let r = await rawUpgrade(port, "/bridge", { Origin: "https://evil.example" });
+    check("cross-origin WebSocket refused", r.status.includes(" 403"), r.status);
+    r.socket.destroy();
+    r = await rawUpgrade(port, "/bridge", { Origin: `http://127.0.0.1:${port}` });
+    check("same-origin WebSocket accepted", r.status.includes(" 101"), r.status);
+    r.socket.destroy();
+    r = await rawUpgrade(port, "/somewhere-else");
+    check("unknown path refused", r.status.includes(" 404"), r.status);
+    r.socket.destroy();
+    r = await rawUpgrade(port, "/bridge/bad%2Froom");
+    check("invalid room name refused", r.status.includes(" 404"), r.status);
+    r.socket.destroy();
+
+    // Rooms are isolated networks
+    const r1 = new Client("room1-A", `${base}/one`);
+    const r2 = new Client("room2-B", `${base}/two`);
+    await Promise.all([r1.opened, r2.opened]);
+    r1.sendFrame(TAG_LOCALTALK, Buffer.from([0, 0, 0, 1, 0x30, 0x30, 0x81]));
+    let leaked = false;
+    try {
+        await r2.recvFrame(([t]) => t === TAG_LOCALTALK, 1000);
+        leaked = true;
+    } catch { /* expected */ }
+    check("rooms are isolated", !leaked);
+
+    // Per-address limit (2): a third connection from 127.0.0.1 is refused
+    r = await rawUpgrade(port, "/bridge/one");
+    check("per-address connection limit", r.status.includes(" 429"), r.status);
+    r.socket.destroy();
+    r1.close();
+    r2.close();
+
+    // Ethernet is off by default: a RARP request gets no answer
+    await new Promise((res) => setTimeout(res, 300));
+    const e = new Client("no-ethernet", `${base}/eth`);
+    await e.opened;
+    e.sendFrame(TAG_ETHERNET, rarpRequest(Buffer.from("008019000001", "hex")));
+    let answered = false;
+    try {
+        await e.recvFrame(([t]) => t === TAG_ETHERNET, 1500);
+        answered = true;
+    } catch { /* expected */ }
+    check("Ethernet/NAT off by default", !answered);
+    e.close();
+
+    // Static files carry the security headers; hidden files are not served
+    const page = await fetch(`http://127.0.0.1:${port}/`);
+    const csp = page.headers.get("content-security-policy") || "";
+    check("page served with a Content-Security-Policy", page.ok && csp.includes("script-src 'self'"));
+    check("page is cross-origin isolated", page.headers.get("cross-origin-embedder-policy") === "require-corp");
+    check("nosniff header", page.headers.get("x-content-type-options") === "nosniff");
+    const hidden = await fetch(`http://127.0.0.1:${port}/.gitignore`);
+    check("hidden files are not served", hidden.status === 404, String(hidden.status));
+    const post = await fetch(`http://127.0.0.1:${port}/`, { method: "POST" });
+    check("only GET/HEAD are allowed", post.status === 405, String(post.status));
+
+    // 6. NAT egress policy: the guest cannot reach this host's loopback
+    // (or other private addresses) unless explicitly allowed
+    console.log("test 6: NAT egress policy");
+    const natPort = await startBridge(["--ethernet"]);
+    const [hitDefault, rstDefault] = await probeLoopbackEgress(`ws://127.0.0.1:${natPort}/bridge/egress`);
+    check("loopback unreachable through NAT by default", !hitDefault);
+    check("refused connection is reset (guest fails fast)", rstDefault);
+    const openPort = await startBridge(["--ethernet", "--egress-allow-private"]);
+    const [hitOpen] = await probeLoopbackEgress(`ws://127.0.0.1:${openPort}/bridge/egress`);
+    check("--egress-allow-private reaches loopback", hitOpen);
+
     if (failures > 0) {
         console.log(`\n${failures} test(s) FAILED`);
         process.exit(1);

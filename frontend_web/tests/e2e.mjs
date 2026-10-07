@@ -79,7 +79,7 @@ if (fullBoot) {
 // -------------------------------------------------------------- bridge
 
 const port = await freePort();
-const bridge = spawn(bridgeBin, ["--addr", "127.0.0.1", "--port", String(port), "--www", www, "--no-lan"], {
+const bridge = spawn(bridgeBin, ["--addr", "127.0.0.1", "--port", String(port), "--www", www], {
     stdio: ["ignore", "inherit", "inherit"],
 });
 const cleanup = [];
