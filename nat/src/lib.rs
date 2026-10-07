@@ -20,9 +20,11 @@ mod https_stripping;
 #[cfg(feature = "mactcp_helpers")]
 mod mactcp_helpers;
 
+pub mod egress;
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -492,6 +494,8 @@ pub struct NatEngineStats {
     pub nat_tcp_fin_local: NatEngineStatCounter,
     pub nat_tcp_fin_remote: NatEngineStatCounter,
     pub nat_expired: NatEngineStatCounter,
+    /// New flows refused by the egress policy or the flow limit
+    pub nat_denied: NatEngineStatCounter,
 }
 
 /// NAT engine instance for handling network address translation
@@ -527,6 +531,12 @@ pub struct NatEngine {
     /// Gateway subnet prefix length (for ICMP Address Mask replies)
     #[cfg(feature = "mactcp_helpers")]
     gateway_subnet: u8,
+
+    /// Which destinations new flows may connect to
+    egress: egress::EgressPolicy,
+
+    /// Maximum number of simultaneous NAT flows (None = unlimited)
+    max_flows: Option<usize>,
 }
 
 impl NatEngine {
@@ -592,7 +602,31 @@ impl NatEngine {
             https_stripping,
             #[cfg(feature = "mactcp_helpers")]
             gateway_subnet,
+            egress: egress::EgressPolicy::allow_all(),
+            max_flows: None,
         }
+    }
+
+    /// Restricts which destinations new flows may connect to (default:
+    /// everything, see [`egress::EgressPolicy::public_internet`])
+    pub fn set_egress_policy(&mut self, policy: egress::EgressPolicy) {
+        self.egress = policy;
+    }
+
+    /// Limits the number of simultaneous NAT flows (default: unlimited)
+    pub fn set_max_flows(&mut self, max_flows: Option<usize>) {
+        self.max_flows = max_flows;
+    }
+
+    /// Whether a new flow to `dest` may be opened; counts refusals
+    fn egress_allowed(&self, dest: SocketAddrV4, proto: egress::EgressProtocol) -> bool {
+        let within_limit = self.max_flows.is_none_or(|max| self.nat_table.len() < max);
+        let allowed = within_limit && self.egress.allows(dest, proto);
+        if !allowed {
+            self.stats.nat_denied.fetch_add(1, Ordering::Relaxed);
+            log::info!("NAT: refused {proto:?} flow to {dest} (egress policy or flow limit)");
+        }
+        allowed
     }
 
     /// Obtains a reference to the statistics of this engine instance
@@ -806,6 +840,12 @@ impl NatEngine {
             }
         } else {
             // Create new NAT entry
+            if !self.egress_allowed(
+                SocketAddrV4::new(dst_ip, dst_port),
+                egress::EgressProtocol::Udp,
+            ) {
+                return Ok(());
+            }
 
             let os_socket = UdpSocket::bind("0.0.0.0:0")?;
             os_socket.set_nonblocking(true)?;
@@ -917,6 +957,30 @@ impl NatEngine {
         let use_https_stripping = self.https_stripping && dst_port == 80;
         #[cfg(not(feature = "https_stripping"))]
         let use_https_stripping = false;
+
+        // HTTPS stripping connects to port 443 of the destination
+        let egress_port = if use_https_stripping { 443 } else { dst_port };
+        if !self.egress_allowed(
+            SocketAddrV4::new(dst_ip, egress_port),
+            egress::EgressProtocol::Tcp,
+        ) {
+            // Refuse the connection right away so the guest does not hang
+            #[cfg(feature = "mactcp_helpers")]
+            {
+                let ack_num = (tcp_packet.seq_number().0 as u32).wrapping_add(1);
+                let buf = mactcp_helpers::build_tcp_rst(
+                    _eth_frame.src_addr(),
+                    self.gateway_mac,
+                    dst_ip,
+                    src_ip,
+                    dst_port,
+                    src_port,
+                    ack_num,
+                );
+                self.device.tx.try_send(buf).ok();
+            }
+            return Ok(());
+        }
 
         if use_https_stripping {
             #[cfg(feature = "https_stripping")]
