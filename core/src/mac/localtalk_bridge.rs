@@ -188,11 +188,15 @@ impl LocalTalkBridge {
         match ptype {
             0x84 => {
                 // lapRTS - Request to send
-                // Don't send over network - synthesize CTS response locally
-                // Both unicast and broadcast RTS get a CTS so the Mac proceeds to send data.
-                // On real hardware, broadcast wouldn't need CTS, but in our emulation
-                // the Mac's SCC driver waits for CTS before sending the next frame.
-                self.pending_cts.push_back((src, dest));
+                // Don't send over network - synthesize the CTS response of a
+                // directed RTS locally. A broadcast RTS gets no CTS: the
+                // sender just waits for the line to stay idle and then sends
+                // the data frame; a CTS arriving in that window looks like a
+                // collision, so the driver would retry and finally give up
+                // (no NBP lookups, RTMP etc. would ever be sent).
+                if dest != 0xFF {
+                    self.pending_cts.push_back((src, dest));
+                }
             }
             0x85 => {
                 // lapCTS - Clear to send
@@ -483,6 +487,16 @@ mod tests {
         // Setting to 0 should be ignored
         bridge.set_node_address(0);
         assert_eq!(bridge.node_address, 42);
+    }
+
+    #[test]
+    fn test_tx_broadcast_rts_gets_no_cts() {
+        let Some(mut bridge) = test_bridge() else {
+            return;
+        };
+
+        bridge.handle_tx_packet(&[0xFF, 42, 0x84]);
+        assert!(bridge.pending_cts.is_empty());
     }
 
     #[test]

@@ -352,12 +352,14 @@ impl Scc {
             self.ch[chi].tx_ip = true;
         }
 
-        // Always push to tx_queue for the byte-stream path (try_extract_packets)
-        self.ch[chi].tx_queue.push_back(val);
-
-        // In SDLC mode, also accumulate for frame boundary detection
+        // In SDLC mode, accumulate the frame until its end is signalled
+        // (Reset Tx Underrun/EOM latch). Feeding the bytes to the byte-stream
+        // path as well would hand partial frames to the bridge whenever a
+        // frame straddles an emulator tick, producing garbage frames.
         if self.ch[chi].sdlc {
             self.ch[chi].lt_tx_frame.push(val);
+        } else {
+            self.ch[chi].tx_queue.push_back(val);
         }
     }
 
