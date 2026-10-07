@@ -47,7 +47,9 @@ would keep choosing the same addresses and colliding.
 
 Address acquisition takes the System 6 LLAP driver up to 640 enquiries; the
 status bar under the screen shows the LocalTalk frames and the AppleTalk
-nodes seen on the network.
+nodes seen on the network. See [Testing AppleTalk in System 6](web-testing.md)
+for checks to run inside the emulated Macs, including multiplayer Bolo, chat
+(EZChat) and MacPing.
 
 `snow-bridge` options:
 

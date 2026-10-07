@@ -44,6 +44,11 @@ recent AppleTalk data frames in `window.snow.stats.dump`).
 
 ## Tests
 
+Manual test cases inside System 6 (Chooser, MacPing, EZChat, Bolo) are in
+[docs/src/manual/network/web-testing.md](../docs/src/manual/network/web-testing.md);
+`tools/network-apps/make-disk.sh` builds the disk with those programs
+(downloaded from the Info-Mac archive, not shipped here).
+
 ```sh
 tests/run-all.sh                     # Rust + JS unit tests, bridge protocol, browser e2e
 docker build -f frontend_web/Dockerfile --target test -t snow-web-test . && docker run --rm snow-web-test
