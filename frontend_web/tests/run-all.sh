@@ -13,7 +13,10 @@ cd "$ROOT"
 echo "== Rust unit tests"
 # (the CPU single-step suite needs the testdata/m68000 submodule)
 cargo test -p snow_core --lib -- --skip singlestep
+cargo test -p snow_nat --all-features
 cargo test -p snow_bridge
+# The public-relay build (no NAT engine)
+cargo test -p snow_bridge --no-default-features
 cargo test -p snow_frontend_web --lib
 
 cd "$ROOT/frontend_web/tests"
